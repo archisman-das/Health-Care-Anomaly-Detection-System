@@ -1,0 +1,171 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Rural health anomaly detection dashboard for clinical operations and model monitoring.">
+  <title>Rural Health Anomaly Dashboard</title>
+  <link rel="stylesheet" href="styles.css">
+  <script defer src="script.js"></script>
+</head>
+<body>
+  <div class="page-shell">
+    <header class="hero">
+      <div class="hero__copy">
+        <p class="eyebrow">Rural Health Care Anomaly Detection System</p>
+        <h1>Operational dashboard for anomaly scoring, review, and retraining.</h1>
+        <p class="lead">
+          Track patient risk, compare Isolation Forest, Autoencoder, and Deep SVDD performance,
+          and monitor the clinician feedback loop that keeps the models improving.
+        </p>
+        <div class="hero__meta">
+          <span class="pill pill--accent">Live browser dashboard</span>
+          <span class="pill">Model agreement + runtime</span>
+          <span class="pill">Feedback-driven retraining</span>
+        </div>
+      </div>
+
+      <div class="hero__status card">
+        <div class="status-row">
+          <div>
+            <div class="stat-label">Dashboard state</div>
+            <div id="dashboard-status" class="stat-value">Loading data...</div>
+          </div>
+          <div class="stat-badge">HTML + CSS + JS</div>
+        </div>
+        <div class="hero__grid" id="summary-grid"></div>
+        <div class="hero__footer">
+          <span id="last-updated">Last updated: pending</span>
+          <button class="button button--ghost" id="reload-button" type="button">Reload data</button>
+        </div>
+      </div>
+    </header>
+
+    <main class="dashboard">
+      <section class="card card--wide">
+        <div class="section-head">
+          <div>
+            <p class="eyebrow">Patient risk map</p>
+            <h2>Alert heatmap and risk distribution</h2>
+          </div>
+          <span class="section-tag">Low / Medium / High</span>
+        </div>
+        <div class="risk-layout">
+          <div class="risk-map" id="patient-risk-map" aria-label="Patient risk map"></div>
+          <div class="risk-legend" id="risk-legend"></div>
+        </div>
+      </section>
+
+      <section class="grid-two">
+        <article class="card">
+          <div class="section-head">
+            <div>
+              <p class="eyebrow">Score trends</p>
+              <h2>Anomaly score over time</h2>
+            </div>
+          </div>
+          <canvas id="trend-chart" width="720" height="360" aria-label="Anomaly score trend chart"></canvas>
+        </article>
+
+        <article class="card">
+          <div class="section-head">
+            <div>
+              <p class="eyebrow">Distribution</p>
+              <h2>Score histogram</h2>
+            </div>
+          </div>
+          <canvas id="distribution-chart" width="720" height="360" aria-label="Anomaly score distribution chart"></canvas>
+        </article>
+      </section>
+
+      <section class="card card--wide">
+        <div class="section-head">
+          <div>
+            <p class="eyebrow">Model comparison</p>
+            <h2>Isolation Forest, Autoencoder, Deep SVDD, and ensemble score</h2>
+          </div>
+          <span class="section-tag">Best model + fusion</span>
+        </div>
+        <div class="table-wrap">
+          <table class="metrics-table">
+            <thead>
+              <tr>
+                <th>Model</th>
+                <th>Precision</th>
+                <th>Recall</th>
+                <th>F1</th>
+                <th>AUC-ROC</th>
+                <th>AUPRC</th>
+                <th>Latency</th>
+                <th>RAM</th>
+              </tr>
+            </thead>
+            <tbody id="model-table-body"></tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="grid-two">
+        <article class="card">
+          <div class="section-head">
+            <div>
+              <p class="eyebrow">Feature explanations</p>
+              <h2>Top contributing features per alert</h2>
+            </div>
+          </div>
+          <div class="feature-list" id="feature-list"></div>
+        </article>
+
+        <article class="card">
+          <div class="section-head">
+            <div>
+              <p class="eyebrow">Agreement</p>
+              <h2>Model consensus and clinician feedback</h2>
+            </div>
+          </div>
+          <div class="agreement-stack" id="agreement-stack"></div>
+          <div class="feedback-panel" id="feedback-panel"></div>
+        </article>
+      </section>
+
+      <section class="grid-two">
+        <article class="card">
+          <div class="section-head">
+            <div>
+              <p class="eyebrow">Runtime</p>
+              <h2>Training time, inference latency, model size, and RAM usage</h2>
+            </div>
+          </div>
+          <div class="runtime-grid" id="runtime-grid"></div>
+        </article>
+
+        <article class="card">
+          <div class="section-head">
+            <div>
+              <p class="eyebrow">Actions</p>
+              <h2>Clinical review flow</h2>
+            </div>
+          </div>
+          <div class="action-list">
+            <div class="action-item">
+              <span class="action-bullet"></span>
+              Clinicians can upload feedback through the API or append it to the ledger.
+            </div>
+            <div class="action-item">
+              <span class="action-bullet"></span>
+              Periodic retraining blends base data with reviewed alerts.
+            </div>
+            <div class="action-item">
+              <span class="action-bullet"></span>
+              The ensemble score is mapped into Low, Medium, and High alert bands.
+            </div>
+          </div>
+          <div class="mini-note">
+            Place a <code>dashboard-data.json</code> file next to these assets if you want the page to load live metrics instead of the built-in demo payload.
+          </div>
+        </article>
+      </section>
+    </main>
+  </div>
+</body>
+</html>
