@@ -701,6 +701,11 @@ class CliEntryPointTests(unittest.TestCase):
         self.assertIn("--output", help_text)
         self.assertIn("--feature-map", help_text)
         self.assertIn("--config-json", help_text)
+        self.assertIn("--calibrate-threshold", help_text)
+        self.assertIn("--no-calibrate-threshold", help_text)
+        self.assertIn("--synthetic-demo-data", help_text)
+        self.assertIn("--synthetic-demo-rows", help_text)
+        self.assertIn("--synthetic-demo-seed", help_text)
 
     def test_legacy_train_pipeline_py_train_execution(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -730,6 +735,103 @@ class CliEntryPointTests(unittest.TestCase):
 
             self.assertTrue(model_path.exists())
             self.assertTrue(feature_map_path.exists())
+
+    def test_legacy_train_pipeline_py_synthetic_demo_training_execution(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmpdir_path = Path(tmpdir)
+            model_path = tmpdir_path / "synthetic_model.joblib"
+            feature_map_path = tmpdir_path / "synthetic_feature_map.csv"
+            config_path = tmpdir_path / "config.json"
+
+            self._write_standard_config(config_path)
+
+            self._run_command(
+                [
+                    "train_pipeline.py",
+                    "--synthetic-demo-data",
+                    "--synthetic-demo-rows",
+                    "120",
+                    "--synthetic-demo-seed",
+                    "7",
+                    "--output",
+                    str(model_path),
+                    "--feature-map",
+                    str(feature_map_path),
+                    "--config-json",
+                    str(config_path),
+                ],
+                train_pipeline.main,
+            )
+
+            self.assertTrue(model_path.exists())
+            self.assertTrue(feature_map_path.exists())
+
+    def test_legacy_train_pipeline_py_can_disable_threshold_calibration(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmpdir_path = Path(tmpdir)
+            train_path = tmpdir_path / "train.csv"
+            model_path = tmpdir_path / "model.joblib"
+            config_path = tmpdir_path / "config.json"
+
+            training_frame = self._build_training_frame().copy()
+            training_frame["label"] = [0, 0, 1]
+            training_frame.to_csv(train_path, index=False)
+            self._write_standard_config(config_path)
+
+            self._run_command(
+                [
+                    "train_pipeline.py",
+                    "--input",
+                    str(train_path),
+                    "--output",
+                    str(model_path),
+                    "--config-json",
+                    str(config_path),
+                    "--no-calibrate-threshold",
+                    "--label-column",
+                    "label",
+                ],
+                train_pipeline.main,
+            )
+
+            pipeline = load_pipeline(model_path)
+            model = pipeline.named_steps["model"]
+            self.assertFalse(model.calibrate_threshold)
+            self.assertFalse(hasattr(model, "calibrated_threshold_"))
+            self.assertFalse(hasattr(model, "calibration_metrics_"))
+
+    def test_legacy_train_pipeline_py_can_override_calibration_min_samples(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmpdir_path = Path(tmpdir)
+            train_path = tmpdir_path / "train.csv"
+            model_path = tmpdir_path / "model.joblib"
+            config_path = tmpdir_path / "config.json"
+
+            training_frame = self._build_training_frame().copy()
+            training_frame["label"] = [0, 0, 1]
+            training_frame.to_csv(train_path, index=False)
+            self._write_standard_config(config_path)
+
+            self._run_command(
+                [
+                    "train_pipeline.py",
+                    "--input",
+                    str(train_path),
+                    "--output",
+                    str(model_path),
+                    "--config-json",
+                    str(config_path),
+                    "--calibration-min-samples",
+                    "7",
+                    "--label-column",
+                    "label",
+                ],
+                train_pipeline.main,
+            )
+
+            pipeline = load_pipeline(model_path)
+            model = pipeline.named_steps["model"]
+            self.assertEqual(model.calibration_min_samples, 7)
 
     def test_dedicated_train_command_entry_point(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -859,6 +961,139 @@ class CliEntryPointTests(unittest.TestCase):
             self.assertEqual(model.autoencoder_l2, 1e-4)
             self.assertEqual(model.autoencoder_random_state, 11)
             self.assertFalse(model.autoencoder_verbose)
+
+    def test_train_cli_accepts_ganomaly_overrides(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmpdir_path = Path(tmpdir)
+            train_path = tmpdir_path / "train.csv"
+            model_path = tmpdir_path / "model.joblib"
+            config_path = tmpdir_path / "config.json"
+
+            self._build_training_frame().to_csv(train_path, index=False)
+            self._write_standard_config(config_path)
+
+            self._run_command(
+                [
+                    "anomaly-cli",
+                    "train",
+                    "--input",
+                    str(train_path),
+                    "--output",
+                    str(model_path),
+                    "--config-json",
+                    str(config_path),
+                    "--ganomaly-hidden-dim",
+                    "16",
+                    "--ganomaly-latent-dim",
+                    "4",
+                    "--ganomaly-dropout",
+                    "0.1",
+                    "--ganomaly-learning-rate",
+                    "0.0005",
+                    "--ganomaly-batch-size",
+                    "16",
+                    "--ganomaly-consistency-weight",
+                    "0.6",
+                    "--ganomaly-threshold-percentile",
+                    "95.0",
+                    "--ganomaly-validation-fraction",
+                    "0.25",
+                    "--ganomaly-max-epochs",
+                    "5",
+                    "--ganomaly-patience",
+                    "2",
+                    "--ganomaly-l2",
+                    "1e-4",
+                    "--ganomaly-random-state",
+                    "11",
+                    "--no-ganomaly-verbose",
+                ],
+                anomaly_cli.main,
+            )
+
+            pipeline = load_pipeline(model_path)
+            model = pipeline.named_steps["model"]
+            self.assertEqual(model.ganomaly_hidden_dim, 16)
+            self.assertEqual(model.ganomaly_latent_dim, 4)
+            self.assertEqual(model.ganomaly_dropout, 0.1)
+            self.assertEqual(model.ganomaly_learning_rate, 0.0005)
+            self.assertEqual(model.ganomaly_batch_size, 16)
+            self.assertEqual(model.ganomaly_consistency_weight, 0.6)
+            self.assertEqual(model.ganomaly_threshold_percentile, 95.0)
+            self.assertEqual(model.ganomaly_validation_fraction, 0.25)
+            self.assertEqual(model.ganomaly_max_epochs, 5)
+            self.assertEqual(model.ganomaly_patience, 2)
+            self.assertEqual(model.ganomaly_l2, 1e-4)
+            self.assertEqual(model.ganomaly_random_state, 11)
+            self.assertFalse(model.ganomaly_verbose)
+
+    def test_train_cli_accepts_anomaly_transformer_overrides(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmpdir_path = Path(tmpdir)
+            train_path = tmpdir_path / "train.csv"
+            model_path = tmpdir_path / "model.joblib"
+            config_path = tmpdir_path / "config.json"
+
+            self._build_training_frame().to_csv(train_path, index=False)
+            self._write_standard_config(config_path)
+
+            self._run_command(
+                [
+                    "anomaly-cli",
+                    "train",
+                    "--input",
+                    str(train_path),
+                    "--output",
+                    str(model_path),
+                    "--config-json",
+                    str(config_path),
+                    "--anomaly-transformer-hidden-dim",
+                    "16",
+                    "--anomaly-transformer-latent-dim",
+                    "4",
+                    "--anomaly-transformer-dropout",
+                    "0.1",
+                    "--anomaly-transformer-learning-rate",
+                    "0.0005",
+                    "--anomaly-transformer-batch-size",
+                    "16",
+                    "--anomaly-transformer-attention-weight",
+                    "0.7",
+                    "--anomaly-transformer-attention-temperature",
+                    "0.8",
+                    "--anomaly-transformer-threshold-percentile",
+                    "95.0",
+                    "--anomaly-transformer-validation-fraction",
+                    "0.25",
+                    "--anomaly-transformer-max-epochs",
+                    "5",
+                    "--anomaly-transformer-patience",
+                    "2",
+                    "--anomaly-transformer-l2",
+                    "1e-4",
+                    "--anomaly-transformer-random-state",
+                    "11",
+                    "--no-anomaly-transformer-verbose",
+                ],
+                anomaly_cli.main,
+            )
+
+            pipeline = load_pipeline(model_path)
+            model = pipeline.named_steps["model"]
+            self.assertEqual(model.anomaly_transformer_hidden_dim, 16)
+            self.assertEqual(model.anomaly_transformer_latent_dim, 4)
+            self.assertEqual(model.anomaly_transformer_dropout, 0.1)
+            self.assertEqual(model.anomaly_transformer_learning_rate, 0.0005)
+            self.assertEqual(model.anomaly_transformer_batch_size, 16)
+            self.assertEqual(model.anomaly_transformer_attention_weight, 0.7)
+            self.assertEqual(model.anomaly_transformer_attention_temperature, 0.8)
+            self.assertEqual(model.anomaly_transformer_threshold_percentile, 95.0)
+            self.assertEqual(model.anomaly_transformer_validation_fraction, 0.25)
+            self.assertEqual(model.anomaly_transformer_max_epochs, 5)
+            self.assertEqual(model.anomaly_transformer_patience, 2)
+            self.assertEqual(model.anomaly_transformer_l2, 1e-4)
+            self.assertEqual(model.anomaly_transformer_random_state, 11)
+            self.assertFalse(model.anomaly_transformer_verbose)
 
     def test_train_cli_accepts_ensemble_fusion_overrides(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -1081,12 +1316,33 @@ class CliEntryPointTests(unittest.TestCase):
         self.assertIn("--deep-svdd-architecture", train_help)
         self.assertIn("--deep-svdd-nu", train_help)
         self.assertIn("--deep-svdd-latent-dim", train_help)
+        self.assertIn("--vae-hidden-dim", train_help)
+        self.assertIn("--vae-latent-dim", train_help)
+        self.assertIn("--vae-beta", train_help)
+        self.assertIn("--vae-learning-rate", train_help)
+        self.assertIn("--anomaly-transformer-hidden-dim", train_help)
+        self.assertIn("--anomaly-transformer-latent-dim", train_help)
+        self.assertIn("--anomaly-transformer-attention-weight", train_help)
+        self.assertIn("--anomaly-transformer-weight", train_help)
+        self.assertIn("--no-anomaly-transformer-verbose", train_help)
+        self.assertIn("--ganomaly-hidden-dim", train_help)
+        self.assertIn("--ganomaly-latent-dim", train_help)
+        self.assertIn("--ganomaly-consistency-weight", train_help)
+        self.assertIn("--ganomaly-weight", train_help)
+        self.assertIn("--no-ganomaly-verbose", train_help)
+        self.assertIn("--vae-weight", train_help)
         self.assertIn("--no-deep-svdd-pretrain-autoencoder", train_help)
         self.assertIn("--ensemble-fusion-strategy", train_help)
         self.assertIn("--ensemble-max-score-threshold", train_help)
+        self.assertIn("--calibrate-threshold", train_help)
+        self.assertIn("--no-calibrate-threshold", train_help)
+        self.assertIn("--calibration-min-samples", train_help)
         self.assertIn("--label-column", train_help)
         self.assertIn("--labels-file", train_help)
         self.assertIn("--labels-column", train_help)
+        self.assertIn("--synthetic-demo-data", train_help)
+        self.assertIn("--synthetic-demo-rows", train_help)
+        self.assertIn("--synthetic-demo-seed", train_help)
         self.assertIn("autoencoder_latent_dim", train_help)
         self.assertIn("autoencoder_threshold_percentile", train_help)
         self.assertIn("autoencoder_dropout", train_help)
@@ -1104,16 +1360,45 @@ class CliEntryPointTests(unittest.TestCase):
         self.assertIn("autoencoder_threshold_percentile", cli_train_help)
         self.assertIn("autoencoder_dropout", cli_train_help)
         self.assertIn("--autoencoder-latent-dim", cli_train_help)
+        self.assertIn("vae_hidden_dim", cli_train_help)
+        self.assertIn("vae_latent_dim", cli_train_help)
+        self.assertIn("vae_beta", cli_train_help)
+        self.assertIn("anomaly_transformer_hidden_dim", cli_train_help)
+        self.assertIn("anomaly_transformer_latent_dim", cli_train_help)
+        self.assertIn("anomaly_transformer_attention_weight", cli_train_help)
+        self.assertIn("anomaly_transformer_weight", cli_train_help)
+        self.assertIn("ganomaly_hidden_dim", cli_train_help)
+        self.assertIn("ganomaly_latent_dim", cli_train_help)
+        self.assertIn("ganomaly_consistency_weight", cli_train_help)
+        self.assertIn("ganomaly_weight", cli_train_help)
+        self.assertIn("--vae-hidden-dim", cli_train_help)
+        self.assertIn("--anomaly-transformer-hidden-dim", cli_train_help)
+        self.assertIn("--anomaly-transformer-latent-dim", cli_train_help)
+        self.assertIn("--anomaly-transformer-attention-weight", cli_train_help)
+        self.assertIn("--anomaly-transformer-weight", cli_train_help)
+        self.assertIn("--no-anomaly-transformer-verbose", cli_train_help)
         self.assertIn("deep_svdd_nu", cli_train_help)
         self.assertIn("deep_svdd_architecture", cli_train_help)
         self.assertIn("--deep-svdd-architecture", cli_train_help)
         self.assertIn("--deep-svdd-nu", cli_train_help)
         self.assertIn("--deep-svdd-latent-dim", cli_train_help)
+        self.assertIn("--ganomaly-hidden-dim", cli_train_help)
+        self.assertIn("--ganomaly-latent-dim", cli_train_help)
+        self.assertIn("--ganomaly-consistency-weight", cli_train_help)
+        self.assertIn("--ganomaly-weight", cli_train_help)
+        self.assertIn("--no-ganomaly-verbose", cli_train_help)
+        self.assertIn("--vae-weight", cli_train_help)
         self.assertIn("--ensemble-fusion-strategy", cli_train_help)
         self.assertIn("--ensemble-max-score-threshold", cli_train_help)
+        self.assertIn("--calibrate-threshold", cli_train_help)
+        self.assertIn("--no-calibrate-threshold", cli_train_help)
+        self.assertIn("--calibration-min-samples", cli_train_help)
         self.assertIn("--label-column", cli_train_help)
         self.assertIn("--labels-file", cli_train_help)
         self.assertIn("--labels-column", cli_train_help)
+        self.assertIn("--synthetic-demo-data", cli_train_help)
+        self.assertIn("--synthetic-demo-rows", cli_train_help)
+        self.assertIn("--synthetic-demo-seed", cli_train_help)
 
         with contextlib.redirect_stdout(io.StringIO()) as predict_stdout:
             with self.assertRaises(SystemExit) as predict_exc:
@@ -1236,7 +1521,39 @@ class CliEntryPointTests(unittest.TestCase):
         self.assertIn("anomaly-dashboard", readme_text)
 
         expected_flags = {
-            "train": {"--input", "--output", "--feature-map", "--config-json"},
+            "train": {
+                "--input",
+                "--output",
+                "--feature-map",
+                "--config-json",
+                "--calibrate-threshold",
+                "--no-calibrate-threshold",
+                "--calibration-min-samples",
+                "--anomaly-transformer-hidden-dim",
+                "--anomaly-transformer-latent-dim",
+                "--anomaly-transformer-attention-weight",
+                "--anomaly-transformer-weight",
+                "--ganomaly-hidden-dim",
+                "--ganomaly-latent-dim",
+                "--ganomaly-consistency-weight",
+                "--ganomaly-weight",
+                "--vae-hidden-dim",
+                "--vae-latent-dim",
+                "--vae-beta",
+                "--vae-learning-rate",
+                "--ganomaly-hidden-dim",
+                "--ganomaly-latent-dim",
+                "--ganomaly-consistency-weight",
+                "--ganomaly-weight",
+                "--anomaly-transformer-hidden-dim",
+                "--anomaly-transformer-latent-dim",
+                "--anomaly-transformer-attention-weight",
+                "--anomaly-transformer-weight",
+                "--vae-weight",
+                "--synthetic-demo-data",
+                "--synthetic-demo-rows",
+                "--synthetic-demo-seed",
+            },
             "predict": {"--model", "--input", "--output"},
             "export-edge": {"--model", "--output-dir", "--opset"},
             "retrain-feedback": {"--input", "--feedback-file", "--output", "--config-json"},

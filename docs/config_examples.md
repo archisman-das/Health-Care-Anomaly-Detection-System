@@ -23,6 +23,19 @@ Suggested starting points:
 - `autoencoder_latent_dim`: `8` for compact representations, or `16` if the preprocessed feature space is wide
 - `autoencoder_threshold_percentile`: `95.0` for a more sensitive cutoff, `97.5` as a balanced default, or `99.0` if you want to reduce false positives
 
+## Variational Autoencoder Tuning Example
+
+```json
+{
+  "vae_hidden_dim": 64,
+  "vae_latent_dim": 8,
+  "vae_beta": 1.0,
+  "vae_dropout": 0.2,
+  "vae_learning_rate": 0.001,
+  "vae_batch_size": 32
+}
+```
+
 ## Deep SVDD Architecture Choice
 
 ```json
@@ -61,20 +74,99 @@ anomaly-cli train --input data.csv --output model.joblib \
   --autoencoder-batch-size 32
 ```
 
+## Anomaly Transformer Tuning Example
+
+```json
+{
+  "anomaly_transformer_hidden_dim": 64,
+  "anomaly_transformer_latent_dim": 8,
+  "anomaly_transformer_attention_weight": 0.5,
+  "anomaly_transformer_attention_temperature": 1.0,
+  "anomaly_transformer_dropout": 0.2,
+  "anomaly_transformer_learning_rate": 0.001,
+  "anomaly_transformer_batch_size": 32
+}
+```
+
+### Anomaly Transformer CLI Equivalent
+
+You can tune the standalone Anomaly Transformer directly from the train
+command:
+
+```bash
+anomaly-cli train --input data.csv --output model.joblib \
+  --anomaly-transformer-hidden-dim 64 \
+  --anomaly-transformer-latent-dim 8 \
+  --anomaly-transformer-attention-weight 0.5 \
+  --anomaly-transformer-attention-temperature 1.0 \
+  --anomaly-transformer-dropout 0.2 \
+  --anomaly-transformer-learning-rate 0.001 \
+  --anomaly-transformer-batch-size 32
+```
+
 ## Ensemble Fusion Weights
 
 ```json
 {
   "ensemble_fusion_weights": {
     "isolation_forest": 0.3,
-    "autoencoder": 0.4,
-    "deep_svdd": 0.3
+  "autoencoder": 0.4,
+  "anomaly_transformer": 0.1,
+  "variational_autoencoder": 0.1,
+  "ganomaly": 0.1,
+  "cnn_autoencoder": 0.1,
+  "deep_svdd": 0.3
   }
 }
 ```
 
+To tune the CNN autoencoder without editing code, pass `--cnn-autoencoder-weight 0.2` to the training CLI.
+To tune the Anomaly Transformer without editing code, pass `--anomaly-transformer-weight 0.1` to the training CLI.
+To tune GANomaly without editing code, pass `--ganomaly-weight 0.1` to the training CLI.
+To tune the variational autoencoder without editing code, pass `--vae-weight 0.1` to the training CLI.
+
 If you leave out a detector, its weight defaults to `0.0`. The ensemble
 normalizes the provided weights before fusing the min-max scaled scores.
+
+If you want the same override directly in `config.json`, set the top-level key:
+
+```json
+{
+  "cnn_autoencoder_weight": 0.2
+}
+```
+
+```json
+{
+  "ganomaly_weight": 0.1
+}
+```
+
+```json
+{
+  "vae_weight": 0.1
+}
+```
+
+## Risk Scoring Blend
+
+```json
+{
+  "risk_scoring_weights": {
+    "anomaly": 0.20,
+    "vitals": 0.35,
+    "labs": 0.30,
+    "access": 0.15
+  }
+}
+```
+
+Use this to tune how the final `risk_score` balances model output with
+clinical context. The weights are normalized automatically, so you can adjust
+them without worrying about the total summing to exactly `1.0`.
+
+Tip: start from [risk_scoring_config.example.json](risk_scoring_config.example.json)
+when you want a ready-made config file for this blend.
 
 ## Max-Score Voting
 
@@ -152,6 +244,18 @@ That command writes:
 
 If you only need one format, you can still use `--output`, `--report-md`, or
 `--report-html` directly.
+
+## Edge Export Bundle
+
+The exported edge bundle includes the fitted preprocessor, feature map exports,
+an ONNX file for Isolation Forest, an ONNX file for the autoencoder, a
+`anomaly_transformer.joblib` artifact for the Anomaly Transformer, a
+`ganomaly.joblib` artifact for GANomaly, an ONNX file for the variational
+autoencoder, and an ONNX file for Deep SVDD.
+
+Use `anomaly-cli export-edge --model model.joblib --output-dir edge_bundle`
+when you want the offline bundle for deployment on a device with Python
+runtime support.
 
 ## Runtime Comparison Output
 

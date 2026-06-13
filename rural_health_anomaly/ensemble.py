@@ -12,12 +12,16 @@ from sklearn.linear_model import LogisticRegression
 from sklearn.utils.parallel import Parallel, delayed
 
 from .autoencoder import DeepAutoencoder
+from .anomaly_transformer import AnomalyTransformer
+from .cnn_autoencoder import CNNAutoencoder
 from .deep_svdd import DeepSVDD
 from .detectors import (
     IsolationForestAnomalyModel,
     LocalOutlierFactorAnomalyModel,
     OneClassSVMAnomalyModel,
 )
+from .ganomaly import GANomaly
+from .variational_autoencoder import VariationalAutoencoder
 
 
 def _ensure_2d_array(X: Any) -> np.ndarray:
@@ -76,8 +80,49 @@ def _coerce_binary_labels(y: Any) -> np.ndarray:
     raise ValueError("Stacking labels must be binary, using 1/-1 or 0/1 conventions.")
 
 
+def _binary_classification_metrics(y_true: np.ndarray, y_pred: np.ndarray) -> dict[str, float]:
+    """Return precision, recall, and F1 for binary predictions."""
+
+    true_positive = float(np.sum((y_true == 1) & (y_pred == 1)))
+    false_positive = float(np.sum((y_true == 0) & (y_pred == 1)))
+    false_negative = float(np.sum((y_true == 1) & (y_pred == 0)))
+
+    precision = true_positive / (true_positive + false_positive) if (true_positive + false_positive) > 0 else 0.0
+    recall = true_positive / (true_positive + false_negative) if (true_positive + false_negative) > 0 else 0.0
+    f1 = 2.0 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0.0
+
+    return {"precision": float(precision), "recall": float(recall), "f1": float(f1)}
+
+
+def _calibrate_threshold_from_scores(scores: np.ndarray, y_true: np.ndarray, *, candidate_count: int = 201) -> tuple[float, dict[str, float]]:
+    """Find the score cutoff that maximizes F1, then precision, then threshold."""
+
+    if scores.shape[0] != y_true.shape[0]:
+        raise ValueError("scores and y_true must have the same length.")
+
+    if scores.size == 0:
+        raise ValueError("scores must not be empty.")
+
+    thresholds = np.linspace(0.0, 1.0, max(3, int(candidate_count)), dtype=float)
+    best_threshold = float(thresholds[0])
+    best_metrics = {"precision": 0.0, "recall": 0.0, "f1": -1.0}
+    best_key = (-1.0, -1.0, -1.0)
+
+    for threshold in thresholds:
+        predicted = (scores >= threshold).astype(int)
+        metrics = _binary_classification_metrics(y_true, predicted)
+        key = (metrics["f1"], metrics["precision"], float(threshold))
+        if key > best_key:
+            best_key = key
+            best_threshold = float(threshold)
+            best_metrics = metrics
+
+    best_metrics["threshold"] = best_threshold
+    return best_threshold, best_metrics
+
+
 class ParallelAnomalyEnsemble(BaseEstimator, OutlierMixin):
-    """Fit five anomaly detectors in parallel and fuse their scores."""
+    """Fit nine anomaly detectors in parallel and fuse their scores."""
 
     def __init__(
         self,
@@ -86,6 +131,8 @@ class ParallelAnomalyEnsemble(BaseEstimator, OutlierMixin):
         n_jobs: int = -1,
         fusion_strategy: str = "weighted_average",
         max_score_threshold: float = 0.8,
+        calibrate_threshold: bool = True,
+        calibration_min_samples: int = 25,
         fusion_weights: dict[str, float] | None = None,
         isolation_forest_n_estimators: int = 300,
         isolation_forest_max_samples: int | str = "auto",
@@ -110,6 +157,59 @@ class ParallelAnomalyEnsemble(BaseEstimator, OutlierMixin):
         autoencoder_l2: float = 1e-5,
         autoencoder_random_state: int = 42,
         autoencoder_verbose: bool = False,
+        ganomaly_hidden_dim: int = 64,
+        ganomaly_latent_dim: int = 8,
+        ganomaly_dropout: float = 0.2,
+        ganomaly_learning_rate: float = 1e-3,
+        ganomaly_batch_size: int = 32,
+        ganomaly_consistency_weight: float = 1.0,
+        ganomaly_threshold_percentile: float = 97.5,
+        ganomaly_validation_fraction: float = 0.2,
+        ganomaly_max_epochs: int = 80,
+        ganomaly_patience: int = 10,
+        ganomaly_l2: float = 1e-5,
+        ganomaly_random_state: int = 42,
+        ganomaly_verbose: bool = False,
+        anomaly_transformer_hidden_dim: int = 64,
+        anomaly_transformer_latent_dim: int = 8,
+        anomaly_transformer_dropout: float = 0.2,
+        anomaly_transformer_learning_rate: float = 1e-3,
+        anomaly_transformer_batch_size: int = 32,
+        anomaly_transformer_attention_weight: float = 0.5,
+        anomaly_transformer_attention_temperature: float = 1.0,
+        anomaly_transformer_threshold_percentile: float = 97.5,
+        anomaly_transformer_validation_fraction: float = 0.2,
+        anomaly_transformer_max_epochs: int = 80,
+        anomaly_transformer_patience: int = 10,
+        anomaly_transformer_l2: float = 1e-5,
+        anomaly_transformer_random_state: int = 42,
+        anomaly_transformer_verbose: bool = False,
+        vae_hidden_dim: int = 64,
+        vae_latent_dim: int = 8,
+        vae_dropout: float = 0.2,
+        vae_learning_rate: float = 1e-3,
+        vae_batch_size: int = 32,
+        vae_beta: float = 1.0,
+        vae_threshold_percentile: float = 97.5,
+        vae_validation_fraction: float = 0.2,
+        vae_max_epochs: int = 80,
+        vae_patience: int = 10,
+        vae_l2: float = 1e-5,
+        vae_random_state: int = 42,
+        vae_verbose: bool = False,
+        cnn_autoencoder_filters: int = 8,
+        cnn_autoencoder_kernel_size: int = 3,
+        cnn_autoencoder_latent_dim: int = 8,
+        cnn_autoencoder_dropout: float = 0.2,
+        cnn_autoencoder_learning_rate: float = 1e-3,
+        cnn_autoencoder_batch_size: int = 32,
+        cnn_autoencoder_threshold_percentile: float = 97.5,
+        cnn_autoencoder_validation_fraction: float = 0.2,
+        cnn_autoencoder_max_epochs: int = 80,
+        cnn_autoencoder_patience: int = 10,
+        cnn_autoencoder_l2: float = 1e-5,
+        cnn_autoencoder_random_state: int = 42,
+        cnn_autoencoder_verbose: bool = False,
         deep_svdd_nu: float = 0.05,
         deep_svdd_center_fixed: bool = True,
         deep_svdd_architecture: str = "mlp",
@@ -130,6 +230,8 @@ class ParallelAnomalyEnsemble(BaseEstimator, OutlierMixin):
         self.n_jobs = n_jobs
         self.fusion_strategy = fusion_strategy
         self.max_score_threshold = max_score_threshold
+        self.calibrate_threshold = calibrate_threshold
+        self.calibration_min_samples = calibration_min_samples
         self.fusion_weights = fusion_weights
         self.isolation_forest_n_estimators = isolation_forest_n_estimators
         self.isolation_forest_max_samples = isolation_forest_max_samples
@@ -154,6 +256,59 @@ class ParallelAnomalyEnsemble(BaseEstimator, OutlierMixin):
         self.autoencoder_l2 = autoencoder_l2
         self.autoencoder_random_state = autoencoder_random_state
         self.autoencoder_verbose = autoencoder_verbose
+        self.ganomaly_hidden_dim = ganomaly_hidden_dim
+        self.ganomaly_latent_dim = ganomaly_latent_dim
+        self.ganomaly_dropout = ganomaly_dropout
+        self.ganomaly_learning_rate = ganomaly_learning_rate
+        self.ganomaly_batch_size = ganomaly_batch_size
+        self.ganomaly_consistency_weight = ganomaly_consistency_weight
+        self.ganomaly_threshold_percentile = ganomaly_threshold_percentile
+        self.ganomaly_validation_fraction = ganomaly_validation_fraction
+        self.ganomaly_max_epochs = ganomaly_max_epochs
+        self.ganomaly_patience = ganomaly_patience
+        self.ganomaly_l2 = ganomaly_l2
+        self.ganomaly_random_state = ganomaly_random_state
+        self.ganomaly_verbose = ganomaly_verbose
+        self.anomaly_transformer_hidden_dim = anomaly_transformer_hidden_dim
+        self.anomaly_transformer_latent_dim = anomaly_transformer_latent_dim
+        self.anomaly_transformer_dropout = anomaly_transformer_dropout
+        self.anomaly_transformer_learning_rate = anomaly_transformer_learning_rate
+        self.anomaly_transformer_batch_size = anomaly_transformer_batch_size
+        self.anomaly_transformer_attention_weight = anomaly_transformer_attention_weight
+        self.anomaly_transformer_attention_temperature = anomaly_transformer_attention_temperature
+        self.anomaly_transformer_threshold_percentile = anomaly_transformer_threshold_percentile
+        self.anomaly_transformer_validation_fraction = anomaly_transformer_validation_fraction
+        self.anomaly_transformer_max_epochs = anomaly_transformer_max_epochs
+        self.anomaly_transformer_patience = anomaly_transformer_patience
+        self.anomaly_transformer_l2 = anomaly_transformer_l2
+        self.anomaly_transformer_random_state = anomaly_transformer_random_state
+        self.anomaly_transformer_verbose = anomaly_transformer_verbose
+        self.vae_hidden_dim = vae_hidden_dim
+        self.vae_latent_dim = vae_latent_dim
+        self.vae_dropout = vae_dropout
+        self.vae_learning_rate = vae_learning_rate
+        self.vae_batch_size = vae_batch_size
+        self.vae_beta = vae_beta
+        self.vae_threshold_percentile = vae_threshold_percentile
+        self.vae_validation_fraction = vae_validation_fraction
+        self.vae_max_epochs = vae_max_epochs
+        self.vae_patience = vae_patience
+        self.vae_l2 = vae_l2
+        self.vae_random_state = vae_random_state
+        self.vae_verbose = vae_verbose
+        self.cnn_autoencoder_filters = cnn_autoencoder_filters
+        self.cnn_autoencoder_kernel_size = cnn_autoencoder_kernel_size
+        self.cnn_autoencoder_latent_dim = cnn_autoencoder_latent_dim
+        self.cnn_autoencoder_dropout = cnn_autoencoder_dropout
+        self.cnn_autoencoder_learning_rate = cnn_autoencoder_learning_rate
+        self.cnn_autoencoder_batch_size = cnn_autoencoder_batch_size
+        self.cnn_autoencoder_threshold_percentile = cnn_autoencoder_threshold_percentile
+        self.cnn_autoencoder_validation_fraction = cnn_autoencoder_validation_fraction
+        self.cnn_autoencoder_max_epochs = cnn_autoencoder_max_epochs
+        self.cnn_autoencoder_patience = cnn_autoencoder_patience
+        self.cnn_autoencoder_l2 = cnn_autoencoder_l2
+        self.cnn_autoencoder_random_state = cnn_autoencoder_random_state
+        self.cnn_autoencoder_verbose = cnn_autoencoder_verbose
         self.deep_svdd_nu = deep_svdd_nu
         self.deep_svdd_center_fixed = deep_svdd_center_fixed
         self.deep_svdd_architecture = deep_svdd_architecture
@@ -223,6 +378,79 @@ class ParallelAnomalyEnsemble(BaseEstimator, OutlierMixin):
                     ),
                 ),
                 (
+                    "variational_autoencoder",
+                    VariationalAutoencoder(
+                        hidden_dim=self.vae_hidden_dim,
+                        latent_dim=self.vae_latent_dim,
+                        dropout=self.vae_dropout,
+                        learning_rate=self.vae_learning_rate,
+                        batch_size=self.vae_batch_size,
+                        beta=self.vae_beta,
+                        threshold_percentile=self.vae_threshold_percentile,
+                        validation_fraction=self.vae_validation_fraction,
+                        max_epochs=self.vae_max_epochs,
+                        patience=self.vae_patience,
+                        l2=self.vae_l2,
+                        random_state=self.vae_random_state,
+                        verbose=self.vae_verbose,
+                    ),
+                ),
+                (
+                    "ganomaly",
+                    GANomaly(
+                        hidden_dim=self.ganomaly_hidden_dim,
+                        latent_dim=self.ganomaly_latent_dim,
+                        dropout=self.ganomaly_dropout,
+                        learning_rate=self.ganomaly_learning_rate,
+                        batch_size=self.ganomaly_batch_size,
+                        consistency_weight=self.ganomaly_consistency_weight,
+                        threshold_percentile=self.ganomaly_threshold_percentile,
+                        validation_fraction=self.ganomaly_validation_fraction,
+                        max_epochs=self.ganomaly_max_epochs,
+                        patience=self.ganomaly_patience,
+                        l2=self.ganomaly_l2,
+                        random_state=self.ganomaly_random_state,
+                        verbose=self.ganomaly_verbose,
+                    ),
+                ),
+                (
+                    "anomaly_transformer",
+                    AnomalyTransformer(
+                        hidden_dim=self.anomaly_transformer_hidden_dim,
+                        latent_dim=self.anomaly_transformer_latent_dim,
+                        dropout=self.anomaly_transformer_dropout,
+                        learning_rate=self.anomaly_transformer_learning_rate,
+                        batch_size=self.anomaly_transformer_batch_size,
+                        attention_weight=self.anomaly_transformer_attention_weight,
+                        attention_temperature=self.anomaly_transformer_attention_temperature,
+                        threshold_percentile=self.anomaly_transformer_threshold_percentile,
+                        validation_fraction=self.anomaly_transformer_validation_fraction,
+                        max_epochs=self.anomaly_transformer_max_epochs,
+                        patience=self.anomaly_transformer_patience,
+                        l2=self.anomaly_transformer_l2,
+                        random_state=self.anomaly_transformer_random_state,
+                        verbose=self.anomaly_transformer_verbose,
+                    ),
+                ),
+                (
+                    "cnn_autoencoder",
+                    CNNAutoencoder(
+                        filters=self.cnn_autoencoder_filters,
+                        kernel_size=self.cnn_autoencoder_kernel_size,
+                        latent_dim=self.cnn_autoencoder_latent_dim,
+                        dropout=self.cnn_autoencoder_dropout,
+                        learning_rate=self.cnn_autoencoder_learning_rate,
+                        batch_size=self.cnn_autoencoder_batch_size,
+                        threshold_percentile=self.cnn_autoencoder_threshold_percentile,
+                        validation_fraction=self.cnn_autoencoder_validation_fraction,
+                        max_epochs=self.cnn_autoencoder_max_epochs,
+                        patience=self.cnn_autoencoder_patience,
+                        l2=self.cnn_autoencoder_l2,
+                        random_state=self.cnn_autoencoder_random_state,
+                        verbose=self.cnn_autoencoder_verbose,
+                    ),
+                ),
+                (
                     "deep_svdd",
                     DeepSVDD(
                         nu=self.deep_svdd_nu,
@@ -252,6 +480,7 @@ class ParallelAnomalyEnsemble(BaseEstimator, OutlierMixin):
     def fit(self, X, y=None):
         X = _ensure_2d_array(X)
         base_estimators = self._build_estimators()
+        labels = _coerce_binary_labels(y) if y is not None else None
 
         fitted_pairs = Parallel(n_jobs=self.n_jobs)(
             delayed(self._fit_single)(name, estimator, X) for name, estimator in base_estimators.items()
@@ -282,9 +511,8 @@ class ParallelAnomalyEnsemble(BaseEstimator, OutlierMixin):
             fused = np.max(component_matrix, axis=1)
             self.offset_ = float(self.max_score_threshold)
         else:
-            if y is None:
+            if labels is None:
                 raise ValueError("Stacking fusion requires labeled training targets passed to fit(X, y).")
-            labels = _coerce_binary_labels(y)
             if labels.shape[0] != X.shape[0]:
                 raise ValueError("Stacking labels must have the same number of rows as X.")
 
@@ -298,14 +526,27 @@ class ParallelAnomalyEnsemble(BaseEstimator, OutlierMixin):
             fused = self.stacking_meta_model_.predict_proba(stacking_features)[:, 1]
             self.offset_ = 0.5
 
+        should_calibrate = (
+            self.calibrate_threshold
+            and labels is not None
+            and self.fusion_strategy_ in {"weighted_average", "stacking"}
+            and labels.shape[0] >= int(self.calibration_min_samples)
+            and np.unique(labels).size > 1
+        )
+        self.calibration_applied_ = bool(should_calibrate)
+        if should_calibrate:
+            calibrated_threshold, calibration_metrics = _calibrate_threshold_from_scores(fused, labels)
+            self.offset_ = float(calibrated_threshold)
+            self.calibrated_threshold_ = float(calibrated_threshold)
+            self.calibration_metrics_ = calibration_metrics
+
         self.training_raw_anomaly_score_ = fused
         return self
 
     def _stacking_feature_matrix(self, component_matrix: np.ndarray) -> np.ndarray:
-        if component_matrix.shape[1] < 5:
-            raise ValueError("Stacking requires the full five-detector score matrix.")
-        indices = [self.component_names_.index(name) for name in ("isolation_forest", "autoencoder", "deep_svdd")]
-        return component_matrix[:, indices]
+        if component_matrix.shape[1] < 2:
+            raise ValueError("Stacking requires at least two detector score columns.")
+        return component_matrix
 
     def _resolve_fusion_weights(self) -> dict[str, float]:
         default_weights = {
@@ -313,6 +554,10 @@ class ParallelAnomalyEnsemble(BaseEstimator, OutlierMixin):
             "one_class_svm": 0.0,
             "local_outlier_factor": 0.0,
             "autoencoder": 0.4,
+            "variational_autoencoder": 0.1,
+            "ganomaly": 0.1,
+            "anomaly_transformer": 0.1,
+            "cnn_autoencoder": 0.1,
             "deep_svdd": 0.3,
         }
         if self.fusion_weights is None:

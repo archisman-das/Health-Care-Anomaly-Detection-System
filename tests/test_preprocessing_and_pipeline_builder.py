@@ -4,16 +4,20 @@ import numpy as np
 import pandas as pd
 
 from rural_health_anomaly import (
+    AnomalyTransformer,
     DeepAutoencoder,
+    CNNAutoencoder,
     DeepSVDD,
     HealthcarePreprocessor,
+    GANomaly,
     IsolationForestAnomalyModel,
     PreprocessingConfig,
     LocalOutlierFactorAnomalyModel,
     OneClassSVMAnomalyModel,
+    VariationalAutoencoder,
     build_anomaly_pipeline,
 )
-from rural_health_anomaly.ensemble import ParallelAnomalyEnsemble
+from rural_health_anomaly.ensemble import ParallelAnomalyEnsemble, _calibrate_threshold_from_scores
 
 
 class PreprocessingAndPipelineBuilderTests(unittest.TestCase):
@@ -124,6 +128,10 @@ class PreprocessingAndPipelineBuilderTests(unittest.TestCase):
                 "one_class_svm",
                 "local_outlier_factor",
                 "autoencoder",
+                "anomaly_transformer",
+                "variational_autoencoder",
+                "ganomaly",
+                "cnn_autoencoder",
                 "deep_svdd",
             },
         )
@@ -168,6 +176,93 @@ class PreprocessingAndPipelineBuilderTests(unittest.TestCase):
         self.assertTrue(hasattr(autoencoder, "threshold_"))
         self.assertGreaterEqual(autoencoder.threshold_, 0.0)
         self.assertEqual(autoencoder.predict(data).shape[0], data.shape[0])
+
+    def test_cnn_autoencoder_produces_anomaly_scores(self):
+        cnn_autoencoder = CNNAutoencoder(
+            filters=4,
+            kernel_size=3,
+            latent_dim=4,
+            threshold_percentile=95.0,
+            validation_fraction=0.25,
+            max_epochs=5,
+            patience=2,
+            random_state=7,
+            verbose=False,
+        )
+        numeric = self.df.select_dtypes(include=["number"]).to_numpy(dtype=float)
+        data = np.vstack([numeric, numeric, numeric])
+        cnn_autoencoder.fit(data)
+
+        self.assertTrue(hasattr(cnn_autoencoder, "threshold_"))
+        self.assertGreaterEqual(cnn_autoencoder.threshold_, 0.0)
+        self.assertEqual(cnn_autoencoder.reconstruction_error(data).shape[0], data.shape[0])
+        self.assertEqual(cnn_autoencoder.predict(data).shape[0], data.shape[0])
+
+    def test_anomaly_transformer_produces_anomaly_scores(self):
+        anomaly_transformer = AnomalyTransformer(
+            hidden_dim=16,
+            latent_dim=4,
+            attention_weight=0.5,
+            attention_temperature=1.0,
+            threshold_percentile=95.0,
+            validation_fraction=0.25,
+            max_epochs=5,
+            patience=2,
+            random_state=7,
+            verbose=False,
+        )
+        numeric = self.df.select_dtypes(include=["number"]).to_numpy(dtype=float)
+        data = np.vstack([numeric, numeric, numeric])
+        anomaly_transformer.fit(data)
+
+        self.assertTrue(hasattr(anomaly_transformer, "threshold_"))
+        self.assertGreaterEqual(anomaly_transformer.threshold_, 0.0)
+        self.assertEqual(anomaly_transformer.reconstruction_error(data).shape[0], data.shape[0])
+        self.assertEqual(anomaly_transformer.attention_discrepancy(data).shape[0], data.shape[0])
+        self.assertEqual(anomaly_transformer.predict(data).shape[0], data.shape[0])
+
+    def test_variational_autoencoder_produces_anomaly_scores(self):
+        variational_autoencoder = VariationalAutoencoder(
+            hidden_dim=16,
+            latent_dim=4,
+            beta=0.5,
+            threshold_percentile=95.0,
+            validation_fraction=0.25,
+            max_epochs=5,
+            patience=2,
+            random_state=7,
+            verbose=False,
+        )
+        numeric = self.df.select_dtypes(include=["number"]).to_numpy(dtype=float)
+        data = np.vstack([numeric, numeric, numeric])
+        variational_autoencoder.fit(data)
+
+        self.assertTrue(hasattr(variational_autoencoder, "threshold_"))
+        self.assertGreaterEqual(variational_autoencoder.threshold_, 0.0)
+        self.assertEqual(variational_autoencoder.reconstruction_error(data).shape[0], data.shape[0])
+        self.assertEqual(variational_autoencoder.predict(data).shape[0], data.shape[0])
+
+    def test_ganomaly_produces_anomaly_scores(self):
+        ganomaly = GANomaly(
+            hidden_dim=16,
+            latent_dim=4,
+            consistency_weight=0.5,
+            threshold_percentile=95.0,
+            validation_fraction=0.25,
+            max_epochs=5,
+            patience=2,
+            random_state=7,
+            verbose=False,
+        )
+        numeric = self.df.select_dtypes(include=["number"]).to_numpy(dtype=float)
+        data = np.vstack([numeric, numeric, numeric])
+        ganomaly.fit(data)
+
+        self.assertTrue(hasattr(ganomaly, "threshold_"))
+        self.assertGreaterEqual(ganomaly.threshold_, 0.0)
+        self.assertEqual(ganomaly.reconstruction_error(data).shape[0], data.shape[0])
+        self.assertEqual(ganomaly.latent_consistency_error(data).shape[0], data.shape[0])
+        self.assertEqual(ganomaly.predict(data).shape[0], data.shape[0])
 
     def test_deep_svdd_threshold_is_derived_from_validation_distances(self):
         deep_svdd = DeepSVDD(
@@ -215,6 +310,9 @@ class PreprocessingAndPipelineBuilderTests(unittest.TestCase):
             OneClassSVMAnomalyModel(nu=0.05),
             LocalOutlierFactorAnomalyModel(n_neighbors=5, contamination=0.05),
             DeepAutoencoder(latent_dim=4, max_epochs=5, patience=2, random_state=7),
+            AnomalyTransformer(hidden_dim=16, latent_dim=4, max_epochs=5, patience=2, random_state=7),
+            GANomaly(hidden_dim=16, latent_dim=4, max_epochs=5, patience=2, random_state=7),
+            VariationalAutoencoder(hidden_dim=16, latent_dim=4, max_epochs=5, patience=2, random_state=7),
             DeepSVDD(latent_dim=4, max_epochs=5, pretrain_autoencoder=False, random_state=7),
         ]
 
@@ -227,11 +325,16 @@ class PreprocessingAndPipelineBuilderTests(unittest.TestCase):
     def test_parallel_ensemble_uses_minmax_weighted_fusion(self):
         config = PreprocessingConfig(
             apply_pca=False,
+            cnn_autoencoder_weight=0.2,
+            anomaly_transformer_weight=0.1,
+            ganomaly_weight=0.15,
+            vae_weight=0.1,
             ensemble_fusion_weights={
                 "isolation_forest": 0.3,
                 "one_class_svm": 0.0,
                 "local_outlier_factor": 0.0,
                 "autoencoder": 0.4,
+                "anomaly_transformer": 0.1,
                 "deep_svdd": 0.3,
             },
         )
@@ -243,6 +346,10 @@ class PreprocessingAndPipelineBuilderTests(unittest.TestCase):
         component_scores = model.score_components(transformed)
         fused_scores = model.raw_anomaly_score(transformed)
 
+        self.assertIn("cnn_autoencoder_anomaly_score", component_scores.columns)
+        self.assertIn("anomaly_transformer_anomaly_score", component_scores.columns)
+        self.assertIn("ganomaly_anomaly_score", component_scores.columns)
+        self.assertIn("variational_autoencoder_anomaly_score", component_scores.columns)
         self.assertTrue(((component_scores >= 0.0) & (component_scores <= 1.0)).all().all())
         self.assertTrue(np.all(fused_scores >= 0.0))
         self.assertTrue(np.all(fused_scores <= 1.0))
@@ -252,9 +359,18 @@ class PreprocessingAndPipelineBuilderTests(unittest.TestCase):
             + component_scores["one_class_svm_anomaly_score"] * 0.0
             + component_scores["local_outlier_factor_anomaly_score"] * 0.0
             + component_scores["autoencoder_anomaly_score"] * 0.4
+            + component_scores["anomaly_transformer_anomaly_score"] * 0.1
+            + component_scores["variational_autoencoder_anomaly_score"] * 0.1
+            + component_scores["ganomaly_anomaly_score"] * 0.15
+            + component_scores["cnn_autoencoder_anomaly_score"] * 0.2
             + component_scores["deep_svdd_anomaly_score"] * 0.3
-        )
+        ) / 1.55
         np.testing.assert_allclose(fused_scores, expected.to_numpy(dtype=float), rtol=1e-6, atol=1e-6)
+
+        self.assertAlmostEqual(model.fusion_weights_["cnn_autoencoder"], 0.2 / 1.55)
+        self.assertAlmostEqual(model.fusion_weights_["anomaly_transformer"], 0.1 / 1.55)
+        self.assertAlmostEqual(model.fusion_weights_["variational_autoencoder"], 0.1 / 1.55)
+        self.assertAlmostEqual(model.fusion_weights_["ganomaly"], 0.15 / 1.55)
 
     def test_parallel_ensemble_uses_max_score_voting(self):
         config = PreprocessingConfig(
@@ -296,6 +412,48 @@ class PreprocessingAndPipelineBuilderTests(unittest.TestCase):
         self.assertTrue(np.all((fused_scores >= 0.0) & (fused_scores <= 1.0)))
         self.assertTrue(np.all(np.isfinite(scores)))
         self.assertEqual(model.predict(transformed).shape[0], len(self.df))
+
+    def test_threshold_calibration_prefers_high_f1_cutoffs(self):
+        scores = np.array([0.1, 0.2, 0.35, 0.8, 0.9], dtype=float)
+        labels = np.array([0, 0, 0, 1, 1], dtype=int)
+
+        threshold, metrics = _calibrate_threshold_from_scores(scores, labels, candidate_count=21)
+
+        self.assertGreaterEqual(threshold, 0.75)
+        self.assertAlmostEqual(metrics["precision"], 1.0)
+        self.assertAlmostEqual(metrics["f1"], 1.0)
+
+    def test_parallel_ensemble_can_disable_threshold_calibration(self):
+        config = PreprocessingConfig(
+            apply_pca=False,
+            ensemble_fusion_strategy="weighted_average",
+            calibrate_threshold=False,
+        )
+        labels = np.array([0, 0, 1], dtype=int)
+        pipeline = build_anomaly_pipeline(config)
+        pipeline.fit(self.df, labels)
+
+        model = pipeline.named_steps["model"]
+        self.assertFalse(hasattr(model, "calibrated_threshold_"))
+        self.assertFalse(hasattr(model, "calibration_metrics_"))
+        self.assertEqual(model.calibrate_threshold, False)
+
+    def test_parallel_ensemble_skips_calibration_with_too_few_labels(self):
+        config = PreprocessingConfig(
+            apply_pca=False,
+            ensemble_fusion_strategy="weighted_average",
+            calibrate_threshold=True,
+            calibration_min_samples=10,
+        )
+        labels = np.array([0, 0, 1], dtype=int)
+        pipeline = build_anomaly_pipeline(config)
+        pipeline.fit(self.df, labels)
+
+        model = pipeline.named_steps["model"]
+        self.assertFalse(hasattr(model, "calibrated_threshold_"))
+        self.assertFalse(hasattr(model, "calibration_metrics_"))
+        self.assertFalse(model.calibration_applied_)
+        self.assertEqual(model.calibration_min_samples, 10)
 
 
 if __name__ == "__main__":

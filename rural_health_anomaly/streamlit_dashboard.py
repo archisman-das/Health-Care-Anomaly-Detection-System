@@ -383,10 +383,11 @@ def render_dashboard() -> None:
         st.info("At least two model score columns are required to render the agreement view.")
     else:
         agreement_cols = st.columns(4)
+        component_count = int(agreement.get("component_count", len(agreement["columns"])))
         agreement_cols[0].metric("Pairwise agreement", f"{agreement['mean_pairwise_agreement_rate']:.3f}")
         agreement_cols[1].metric("At least two flag rate", f"{agreement['at_least_two_flag_rate']:.3f}")
-        agreement_cols[2].metric("All three flag rate", f"{agreement['all_three_flag_rate']:.3f}")
-        agreement_cols[3].metric("All three flag count", agreement["all_three_flag_count"])
+        agreement_cols[2].metric(f"All {component_count} models flag rate", f"{agreement['all_models_flag_rate']:.3f}")
+        agreement_cols[3].metric(f"All {component_count} models flag count", agreement["all_models_flag_count"])
         st.dataframe(agreement_summary["matrix"].style.background_gradient(cmap="Blues"), use_container_width=True)
 
     with st.expander("Raw data preview", expanded=False):

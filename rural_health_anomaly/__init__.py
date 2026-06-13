@@ -2,6 +2,10 @@
 
 from .config import PreprocessingConfig
 from .autoencoder import DeepAutoencoder
+from .cnn_autoencoder import CNNAutoencoder
+from .anomaly_transformer import AnomalyTransformer
+from .ganomaly import GANomaly
+from .variational_autoencoder import VariationalAutoencoder
 from .deep_svdd import DeepSVDD
 from .ensemble import ParallelAnomalyEnsemble
 from .evaluation import compare_labeled_score_columns, evaluate_labeled_scores, evaluate_score_columns, summarize_anomaly_scores
@@ -23,6 +27,10 @@ from .schema import (
 __all__ = [
     "PreprocessingConfig",
     "DeepAutoencoder",
+    "CNNAutoencoder",
+    "AnomalyTransformer",
+    "GANomaly",
+    "VariationalAutoencoder",
     "DeepSVDD",
     "IsolationForestAnomalyModel",
     "OneClassSVMAnomalyModel",

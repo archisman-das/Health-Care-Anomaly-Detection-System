@@ -31,12 +31,18 @@ class EdgeExportTests(unittest.TestCase):
             manifest_path = output_dir / "edge_bundle_manifest.json"
             isolation_path = output_dir / "isolation_forest.onnx"
             autoencoder_path = output_dir / "autoencoder.onnx"
+            anomaly_transformer_path = output_dir / "anomaly_transformer.joblib"
+            variational_autoencoder_path = output_dir / "variational_autoencoder.onnx"
+            ganomaly_path = output_dir / "ganomaly.joblib"
             deep_svdd_path = output_dir / "deep_svdd.onnx"
             preprocessor_path = output_dir / "preprocessor.joblib"
 
             self.assertTrue(manifest_path.exists())
             self.assertTrue(isolation_path.exists())
             self.assertTrue(autoencoder_path.exists())
+            self.assertTrue(anomaly_transformer_path.exists())
+            self.assertTrue(variational_autoencoder_path.exists())
+            self.assertTrue(ganomaly_path.exists())
             self.assertTrue(deep_svdd_path.exists())
             self.assertTrue(preprocessor_path.exists())
             self.assertTrue((output_dir / "feature_map.csv").exists())
@@ -46,9 +52,15 @@ class EdgeExportTests(unittest.TestCase):
             self.assertIn("artifacts", manifest)
             self.assertIn("isolation_forest", manifest["artifacts"])
             self.assertIn("autoencoder", manifest["artifacts"])
+            self.assertIn("anomaly_transformer", manifest["artifacts"])
+            self.assertIn("variational_autoencoder", manifest["artifacts"])
+            self.assertIn("ganomaly", manifest["artifacts"])
             self.assertIn("deep_svdd", manifest["artifacts"])
             self.assertEqual(Path(exported["manifest"]).name, manifest_path.name)
             self.assertEqual(Path(exported["autoencoder_onnx"]).name, autoencoder_path.name)
+            self.assertEqual(Path(exported["anomaly_transformer_joblib"]).name, anomaly_transformer_path.name)
+            self.assertEqual(Path(exported["variational_autoencoder_onnx"]).name, variational_autoencoder_path.name)
+            self.assertEqual(Path(exported["ganomaly_joblib"]).name, ganomaly_path.name)
 
 
 if __name__ == "__main__":

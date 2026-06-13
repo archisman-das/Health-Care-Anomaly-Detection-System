@@ -4,6 +4,7 @@ from contextlib import redirect_stdout
 
 from example_training_inference import (
     build_inference_data,
+    build_large_training_data,
     build_training_data,
     main as example_main,
 )
@@ -43,11 +44,18 @@ class ExamplePipelineTests(unittest.TestCase):
     def test_example_main_runs_without_error(self):
         buffer = io.StringIO()
         with redirect_stdout(buffer):
-            example_main()
+            example_main(training_rows=240, inference_rows=24)
 
         output = buffer.getvalue()
         self.assertIn("Feature map:", output)
         self.assertIn("anomaly_score", output)
+
+    def test_large_synthetic_training_data_scales_to_thousands_of_rows(self):
+        synthetic_df = build_large_training_data(target_rows=9600)
+
+        self.assertEqual(len(synthetic_df), 9600)
+        self.assertEqual(set(synthetic_df.columns), set(build_training_data().columns))
+        self.assertTrue(synthetic_df["patient_id"].str.startswith("TR").all())
 
     def test_common_interface_demo_runs_without_error(self):
         buffer = io.StringIO()

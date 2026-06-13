@@ -50,6 +50,9 @@ class EdgeInferenceTests(unittest.TestCase):
             self.assertIn("risk_level", scored.columns)
             self.assertIn("isolation_forest_anomaly_score", scored.columns)
             self.assertIn("autoencoder_anomaly_score", scored.columns)
+            self.assertIn("anomaly_transformer_anomaly_score", scored.columns)
+            self.assertIn("variational_autoencoder_anomaly_score", scored.columns)
+            self.assertIn("ganomaly_anomaly_score", scored.columns)
             self.assertIn("deep_svdd_anomaly_score", scored.columns)
 
 

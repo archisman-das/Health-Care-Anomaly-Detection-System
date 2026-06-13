@@ -9,7 +9,7 @@ from pathlib import Path
 import pandas as pd
 
 from rural_health_anomaly.cli import run_predict, run_retrain_feedback, run_train
-from rural_health_anomaly.training import _risk_level_from_score, load_pipeline
+from rural_health_anomaly.training import _clinical_risk_component, _generate_risk_score, _risk_category_from_score, load_pipeline, score_records
 
 
 class CliTrainingAndArtifactTests(unittest.TestCase):
@@ -163,6 +163,15 @@ class CliTrainingAndArtifactTests(unittest.TestCase):
             self.assertIn("autoencoder_anomaly_score", scored.columns)
             self.assertIn("autoencoder_reconstruction_error", scored.columns)
             self.assertIn("autoencoder_reconstruction_mae", scored.columns)
+            self.assertIn("anomaly_transformer_anomaly_score", scored.columns)
+            self.assertIn("anomaly_transformer_reconstruction_error", scored.columns)
+            self.assertIn("anomaly_transformer_attention_discrepancy", scored.columns)
+            self.assertIn("variational_autoencoder_anomaly_score", scored.columns)
+            self.assertIn("variational_autoencoder_reconstruction_error", scored.columns)
+            self.assertIn("variational_autoencoder_reconstruction_mae", scored.columns)
+            self.assertIn("ganomaly_anomaly_score", scored.columns)
+            self.assertIn("ganomaly_reconstruction_error", scored.columns)
+            self.assertIn("ganomaly_latent_consistency_error", scored.columns)
             self.assertIn("deep_svdd_distance", scored.columns)
             self.assertIn("raw_anomaly_score", scored.columns)
             self.assertIn("anomaly_score", scored.columns)
@@ -180,13 +189,132 @@ class CliTrainingAndArtifactTests(unittest.TestCase):
             self.assertIn("inference_throughput_rows_per_second", scored.columns)
             self.assertEqual(len(scored), 2)
 
-    def test_predict_cli_assigns_risk_levels_from_score_thresholds(self):
-        self.assertEqual(_risk_level_from_score(0.0), "Low")
-        self.assertEqual(_risk_level_from_score(0.39), "Low")
-        self.assertEqual(_risk_level_from_score(0.4), "Medium")
-        self.assertEqual(_risk_level_from_score(0.69), "Medium")
-        self.assertEqual(_risk_level_from_score(0.7), "High")
-        self.assertEqual(_risk_level_from_score(1.0), "High")
+    def test_predict_cli_assigns_risk_categories_from_score_thresholds(self):
+        self.assertEqual(_risk_category_from_score(0.0), "Normal")
+        self.assertEqual(_risk_category_from_score(0.29), "Normal")
+        self.assertEqual(_risk_category_from_score(0.3), "Moderate")
+        self.assertEqual(_risk_category_from_score(0.59), "Moderate")
+        self.assertEqual(_risk_category_from_score(0.6), "High")
+        self.assertEqual(_risk_category_from_score(0.84), "High")
+        self.assertEqual(_risk_category_from_score(0.85), "Critical")
+        self.assertEqual(_risk_category_from_score(1.0), "Critical")
+
+    def test_generate_risk_score_scales_to_percentage(self):
+        self.assertEqual(_generate_risk_score(0.0), 0.0)
+        self.assertEqual(_generate_risk_score(0.435), 43.5)
+        self.assertEqual(_generate_risk_score(1.0), 100.0)
+        self.assertEqual(_generate_risk_score(1.7), 100.0)
+
+    def test_risk_scoring_weights_from_config_json_are_applied(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmpdir_path = Path(tmpdir)
+            train_path = tmpdir_path / "train.csv"
+            infer_path = tmpdir_path / "infer.csv"
+            model_path = tmpdir_path / "model.joblib"
+            config_path = tmpdir_path / "config.json"
+
+            self._write_csv(train_path, self._build_training_frame())
+            self._write_csv(infer_path, self._build_inference_frame())
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "apply_pca": False,
+                        "risk_scoring_weights": {
+                            "anomaly": 1.0,
+                            "vitals": 0.0,
+                            "labs": 0.0,
+                            "access": 0.0,
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            train_args = argparse.Namespace(
+                input=str(train_path),
+                output=str(model_path),
+                feature_map=None,
+                config_json=str(config_path),
+            )
+            with contextlib.redirect_stdout(io.StringIO()):
+                run_train(train_args)
+
+            pipeline = load_pipeline(model_path)
+            inference_frame = self._build_inference_frame()
+            scored = score_records(pipeline, inference_frame)
+            self.assertEqual(pipeline.risk_scoring_weights_["anomaly"], 1.0)
+            self.assertEqual(pipeline.risk_scoring_weights_["vitals"], 0.0)
+            self.assertEqual(pipeline.risk_scoring_weights_["labs"], 0.0)
+            self.assertEqual(pipeline.risk_scoring_weights_["access"], 0.0)
+            expected_risk_score = scored["anomaly_score"].astype(float).map(_generate_risk_score)
+            self.assertTrue((scored["risk_score"].astype(float) == expected_risk_score).all())
+
+    def test_clinical_risk_component_increases_with_worse_context(self):
+        baseline = {
+            "anomaly_score": 0.15,
+            "heart_rate_bpm": 78,
+            "systolic_bp_mmhg": 120,
+            "diastolic_bp_mmhg": 78,
+            "spo2_percent": 98,
+            "body_temperature_c": 36.8,
+            "respiratory_rate_bpm": 16,
+            "bmi_kg_m2": 22,
+            "glucose_fasting_mg_dl": 96,
+            "glucose_postprandial_mg_dl": 132,
+            "hba1c_percent": 5.4,
+            "hemoglobin_g_dl": 13.8,
+            "wbc_count_10e9_l": 7.0,
+            "platelets_10e9_l": 240,
+            "ldl_mg_dl": 92,
+            "hdl_mg_dl": 54,
+            "triglycerides_mg_dl": 130,
+            "creatinine_mg_dl": 0.9,
+            "egfr_ml_min_1_73m2": 94,
+            "visits_last_90_days": 0,
+            "symptom_duration_days": 1,
+            "distance_to_nearest_facility_km": 1.5,
+            "readmission_frequency": 0,
+            "days_between_visits_trend": [30, 28, 31],
+            "sanitation_index": 0.92,
+            "drug_adherence_rate": 0.95,
+            "treatment_response_score": 0.96,
+        }
+        elevated = dict(baseline)
+        elevated.update(
+            {
+                "heart_rate_bpm": 112,
+                "systolic_bp_mmhg": 168,
+                "diastolic_bp_mmhg": 104,
+                "spo2_percent": 88,
+                "body_temperature_c": 39.1,
+                "respiratory_rate_bpm": 28,
+                "bmi_kg_m2": 31.5,
+                "glucose_fasting_mg_dl": 182,
+                "glucose_postprandial_mg_dl": 286,
+                "hba1c_percent": 9.4,
+                "hemoglobin_g_dl": 9.2,
+                "wbc_count_10e9_l": 13.2,
+                "platelets_10e9_l": 145,
+                "ldl_mg_dl": 168,
+                "hdl_mg_dl": 32,
+                "triglycerides_mg_dl": 294,
+                "creatinine_mg_dl": 1.7,
+                "egfr_ml_min_1_73m2": 48,
+                "visits_last_90_days": 6,
+                "symptom_duration_days": 18,
+                "distance_to_nearest_facility_km": 14.0,
+                "readmission_frequency": 3,
+                "days_between_visits_trend": [9, 8, 7],
+                "sanitation_index": 0.42,
+                "drug_adherence_rate": 0.48,
+                "treatment_response_score": 0.41,
+            }
+        )
+
+        self.assertLess(
+            _clinical_risk_component(baseline, anomaly_score=0.15),
+            _clinical_risk_component(elevated, anomaly_score=0.15),
+        )
 
     def test_predict_cli_includes_autoencoder_score_columns(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -231,6 +359,9 @@ class CliTrainingAndArtifactTests(unittest.TestCase):
             self.assertIn("autoencoder_anomaly_score", scored.columns)
             self.assertIn("autoencoder_reconstruction_error", scored.columns)
             self.assertIn("autoencoder_reconstruction_mae", scored.columns)
+            self.assertIn("anomaly_transformer_anomaly_score", scored.columns)
+            self.assertIn("variational_autoencoder_anomaly_score", scored.columns)
+            self.assertIn("ganomaly_anomaly_score", scored.columns)
 
     def test_retrain_feedback_cli_rebuilds_model_from_clinician_ledger(self):
         with tempfile.TemporaryDirectory() as tmpdir:

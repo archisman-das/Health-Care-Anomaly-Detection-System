@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import ast
+import hashlib
 import json
 import pickle
 import sys
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -22,14 +24,174 @@ from .schema import (
 
 _DEFAULT_DATETIME_COLUMNS = ("recorded_at", "specimen_time")
 _LIST_COLUMNS = tuple(SCHEMA_MULTI_VALUE_FEATURES + SCHEMA_LIST_NUMERIC_FEATURES)
+_DEFAULT_RISK_SCORING_WEIGHTS = {
+    "anomaly": 0.20,
+    "vitals": 0.35,
+    "labs": 0.30,
+    "access": 0.15,
+}
 
 
-def _risk_level_from_score(score: float) -> str:
-    if score < 0.4:
-        return "Low"
-    if score < 0.7:
-        return "Medium"
-    return "High"
+def _risk_category_from_score(score: float) -> str:
+    """Map a normalized anomaly score to a clinical risk category."""
+
+    if score < 0.3:
+        return "Normal"
+    if score < 0.6:
+        return "Moderate"
+    if score < 0.85:
+        return "High"
+    return "Critical"
+
+
+def _generate_risk_score(score: float) -> float:
+    """Convert a normalized anomaly score into a 0-100 risk score."""
+
+    return float(round(max(0.0, min(1.0, score)) * 100.0, 1))
+
+
+def _resolve_risk_scoring_weights(weights: dict[str, float] | None) -> dict[str, float]:
+    """Normalize a configurable risk scoring weight mapping."""
+
+    if not weights:
+        return dict(_DEFAULT_RISK_SCORING_WEIGHTS)
+
+    resolved = {name: float(weights.get(name, default)) for name, default in _DEFAULT_RISK_SCORING_WEIGHTS.items()}
+    total = float(sum(value for value in resolved.values() if pd.notna(value)))
+    if total <= 0.0:
+        return dict(_DEFAULT_RISK_SCORING_WEIGHTS)
+    return {name: float(value / total) for name, value in resolved.items()}
+
+
+def _clamp_unit_interval(value: Any, default: float | None = None) -> float | None:
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError):
+        return default
+    if pd.isna(numeric):
+        return default
+    return float(max(0.0, min(1.0, numeric)))
+
+
+def _scale_to_unit_interval(value: Any, *, anchor: float, span: float, invert: bool = False) -> float | None:
+    numeric = _safe_float(value)
+    if numeric is None:
+        return None
+    if span <= 0:
+        return None
+    if invert:
+        return _clamp_unit_interval((anchor - numeric) / span, default=None)
+    return _clamp_unit_interval((numeric - anchor) / span, default=None)
+
+
+def _safe_float(value: Any) -> float | None:
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError):
+        return None
+    if pd.isna(numeric):
+        return None
+    return float(numeric)
+
+
+def _mean_present(values: list[float | None]) -> float | None:
+    present = [float(value) for value in values if value is not None and not pd.isna(value)]
+    if not present:
+        return None
+    return float(sum(present) / len(present))
+
+
+def _parse_trend_days(value: Any) -> float | None:
+    series = _coerce_list_cell(value)
+    if not isinstance(series, list):
+        return _safe_float(series)
+    numbers = [_safe_float(item) for item in series]
+    return _mean_present(numbers)
+
+
+def _clinical_risk_component(
+    row: pd.Series | dict[str, Any],
+    *,
+    anomaly_score: float,
+    weights: dict[str, float] | None = None,
+) -> float:
+    """Blend anomaly output with vitals, labs, and access barriers."""
+
+    resolved_weights = _resolve_risk_scoring_weights(weights)
+    anomaly_weight = resolved_weights["anomaly"]
+    vitals_weight = resolved_weights["vitals"]
+    labs_weight = resolved_weights["labs"]
+    access_weight = resolved_weights["access"]
+
+    def pick(*keys: str) -> Any:
+        for key in keys:
+            if isinstance(row, pd.Series):
+                if key in row.index:
+                    value = row[key]
+                    if value is None:
+                        continue
+                    if isinstance(value, float) and pd.isna(value):
+                        continue
+                    return value
+            else:
+                value = row.get(key)
+                if value is not None and not (isinstance(value, float) and pd.isna(value)):
+                    return value
+        return None
+
+    vitals = _mean_present([
+        _scale_to_unit_interval(pick("heart_rate_bpm", "heart_rate"), anchor=75.0, span=45.0),
+        _scale_to_unit_interval(pick("systolic_bp_mmhg", "systolic_blood_pressure"), anchor=120.0, span=50.0),
+        _scale_to_unit_interval(pick("diastolic_bp_mmhg", "diastolic_blood_pressure"), anchor=80.0, span=30.0),
+        _scale_to_unit_interval(pick("spo2_percent", "spo2"), anchor=97.0, span=15.0, invert=True),
+        _scale_to_unit_interval(pick("body_temperature_c", "body_temperature"), anchor=37.0, span=2.0),
+        _scale_to_unit_interval(pick("respiratory_rate_bpm", "respiratory_rate"), anchor=16.0, span=10.0),
+        _scale_to_unit_interval(pick("bmi_kg_m2", "bmi"), anchor=22.0, span=18.0),
+    ])
+
+    labs = _mean_present([
+        _scale_to_unit_interval(pick("glucose_fasting_mg_dl", "fasting_glucose"), anchor=100.0, span=120.0),
+        _scale_to_unit_interval(pick("glucose_postprandial_mg_dl", "postprandial_glucose"), anchor=140.0, span=160.0),
+        _scale_to_unit_interval(pick("hba1c_percent", "hba1c"), anchor=5.7, span=4.3),
+        _scale_to_unit_interval(pick("hemoglobin_g_dl", "hb_g_dl"), anchor=13.5, span=5.5, invert=True),
+        _scale_to_unit_interval(pick("wbc_count_10e9_l", "wbc_count"), anchor=7.0, span=8.0),
+        _scale_to_unit_interval(pick("platelets_10e9_l", "platelet_count"), anchor=250.0, span=180.0),
+        _scale_to_unit_interval(pick("ldl_mg_dl", "ldl"), anchor=100.0, span=100.0),
+        _scale_to_unit_interval(pick("hdl_mg_dl", "hdl"), anchor=50.0, span=40.0, invert=True),
+        _scale_to_unit_interval(pick("triglycerides_mg_dl", "triglycerides"), anchor=150.0, span=250.0),
+        _scale_to_unit_interval(pick("alt_u_l", "alt"), anchor=35.0, span=80.0),
+        _scale_to_unit_interval(pick("ast_u_l", "ast"), anchor=35.0, span=80.0),
+        _scale_to_unit_interval(pick("bilirubin_mg_dl", "bilirubin"), anchor=1.0, span=2.5),
+        _scale_to_unit_interval(pick("creatinine_mg_dl", "creatinine"), anchor=1.0, span=1.8),
+        _scale_to_unit_interval(pick("bun_mg_dl", "bun"), anchor=15.0, span=25.0),
+        _scale_to_unit_interval(pick("egfr_ml_min_1_73m2", "egfr"), anchor=90.0, span=75.0, invert=True),
+        _scale_to_unit_interval(pick("sodium_mmol_l", "sodium"), anchor=140.0, span=12.0),
+        _scale_to_unit_interval(pick("potassium_mmol_l", "potassium"), anchor=4.2, span=2.0),
+        _scale_to_unit_interval(pick("calcium_mg_dl", "calcium"), anchor=9.3, span=2.0),
+    ])
+
+    access = _mean_present([
+        _scale_to_unit_interval(pick("visits_last_90_days", "visits_in_last_90_days"), anchor=0.0, span=8.0),
+        _scale_to_unit_interval(pick("symptom_duration_days", "symptom_duration"), anchor=0.0, span=14.0),
+        _scale_to_unit_interval(pick("distance_to_nearest_facility_km", "distance_to_facility_km"), anchor=0.0, span=20.0),
+        _scale_to_unit_interval(pick("readmission_frequency", "readmission_count"), anchor=0.0, span=4.0),
+        _scale_to_unit_interval(_parse_trend_days(pick("days_between_visits_trend")), anchor=30.0, span=30.0, invert=True),
+        _scale_to_unit_interval(pick("sanitation_index"), anchor=1.0, span=1.0, invert=True),
+        _scale_to_unit_interval(pick("drug_adherence_rate"), anchor=1.0, span=1.0, invert=True),
+        _scale_to_unit_interval(pick("treatment_response_score"), anchor=1.0, span=1.0, invert=True),
+    ])
+
+    weighted_components: list[tuple[float, float]] = [(anomaly_weight, _clamp_unit_interval(anomaly_score, default=0.0) or 0.0)]
+    if vitals is not None:
+        weighted_components.append((vitals_weight, vitals))
+    if labs is not None:
+        weighted_components.append((labs_weight, labs))
+    if access is not None:
+        weighted_components.append((access_weight, access))
+
+    total_weight = sum(weight for weight, _ in weighted_components)
+    blended_score = sum(weight * value for weight, value in weighted_components) / total_weight if total_weight > 0 else 0.0
+    return float(_generate_risk_score(blended_score))
 
 
 def _estimate_object_size_bytes(obj: Any) -> int:
@@ -197,6 +359,17 @@ def save_pipeline(pipeline, output_path: str | Path) -> None:
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     joblib.dump(pipeline, output_path)
+    artifact_bytes = output_path.read_bytes()
+    artifact_sha256 = hashlib.sha256(artifact_bytes).hexdigest()
+    metadata = {
+        "model_name": output_path.stem,
+        "model_version": f"artifact-{artifact_sha256[:12]}",
+        "artifact_sha256": artifact_sha256,
+        "model_path": str(output_path),
+        "created_at_utc": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+        "pipeline_class": type(pipeline).__name__,
+    }
+    output_path.with_suffix(".metadata.json").write_text(json.dumps(metadata, indent=2), encoding="utf-8")
 
 
 def load_pipeline(path: str | Path):
@@ -209,6 +382,7 @@ def score_records(pipeline, data: pd.DataFrame) -> pd.DataFrame:
     """Return anomaly scores and flags for a batch of records."""
 
     model = pipeline.named_steps["model"]
+    risk_scoring_weights = getattr(pipeline, "risk_scoring_weights_", None)
     batch_start = time.perf_counter()
     transformed = pipeline.named_steps["preprocessor"].transform(data)
     raw_scores = model.raw_anomaly_score(transformed)
@@ -225,14 +399,31 @@ def score_records(pipeline, data: pd.DataFrame) -> pd.DataFrame:
         autoencoder = model.estimators_["autoencoder"]
         output["autoencoder_reconstruction_error"] = autoencoder.reconstruction_error(transformed)
         output["autoencoder_reconstruction_mae"] = autoencoder.reconstruction_mae(transformed)
+    if hasattr(model, "estimators_") and "variational_autoencoder" in model.estimators_:
+        variational_autoencoder = model.estimators_["variational_autoencoder"]
+        output["variational_autoencoder_reconstruction_error"] = variational_autoencoder.reconstruction_error(transformed)
+        output["variational_autoencoder_reconstruction_mae"] = variational_autoencoder.reconstruction_mae(transformed)
+    if hasattr(model, "estimators_") and "ganomaly" in model.estimators_:
+        ganomaly = model.estimators_["ganomaly"]
+        output["ganomaly_reconstruction_error"] = ganomaly.reconstruction_error(transformed)
+        output["ganomaly_latent_consistency_error"] = ganomaly.latent_consistency_error(transformed)
+    if hasattr(model, "estimators_") and "anomaly_transformer" in model.estimators_:
+        anomaly_transformer = model.estimators_["anomaly_transformer"]
+        output["anomaly_transformer_reconstruction_error"] = anomaly_transformer.reconstruction_error(transformed)
+        output["anomaly_transformer_attention_discrepancy"] = anomaly_transformer.attention_discrepancy(transformed)
     if hasattr(model, "estimators_") and "deep_svdd" in model.estimators_:
         deep_svdd = model.estimators_["deep_svdd"]
         output["deep_svdd_distance"] = deep_svdd.latent_distance(transformed)
     output["raw_anomaly_score"] = raw_scores
     output["anomaly_score"] = raw_scores
-    output["risk_level"] = output["anomaly_score"].apply(lambda value: _risk_level_from_score(float(value)))
-    output["risk_score"] = output["anomaly_score"]
-    output["alert_triggered"] = output["risk_level"].isin(["Medium", "High"])
+    output["clinical_risk_score"] = output.apply(
+        lambda row: _clinical_risk_component(row, anomaly_score=float(row["anomaly_score"]), weights=risk_scoring_weights),
+        axis=1,
+    )
+    output["risk_score"] = output["clinical_risk_score"]
+    output["risk_category"] = output["risk_score"].apply(lambda value: _risk_category_from_score(float(value) / 100.0))
+    output["risk_level"] = output["risk_category"]
+    output["alert_triggered"] = output["risk_category"].isin(["High", "Critical"])
     output["decision_margin"] = decision_margin
     output["anomaly_flag"] = flags
     output["is_anomaly"] = output["anomaly_flag"].map({1: False, -1: True})

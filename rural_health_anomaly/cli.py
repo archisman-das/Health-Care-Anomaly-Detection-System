@@ -12,6 +12,7 @@ from . import PreprocessingConfig
 from .edge_export import export_edge_bundle
 from .feedback import build_retraining_dataset, load_feedback_ledger
 from .evaluation import build_evaluation_report
+from .example import build_large_training_data
 from .training import (
     load_pipeline,
     load_tabular_data,
@@ -23,8 +24,13 @@ from .training import (
 _CONFIG_HELP = (
     "Optional JSON file with PreprocessingConfig overrides. "
     "Common keys include autoencoder_latent_dim, autoencoder_threshold_percentile, "
-    "autoencoder_dropout, autoencoder_learning_rate, ensemble_fusion_strategy, "
-    "ensemble_max_score_threshold, deep_svdd_nu, and deep_svdd_architecture."
+    "autoencoder_dropout, autoencoder_learning_rate, vae_hidden_dim, vae_latent_dim, "
+    "vae_beta, anomaly_transformer_hidden_dim, anomaly_transformer_latent_dim, "
+    "anomaly_transformer_attention_weight, ganomaly_hidden_dim, ganomaly_latent_dim, "
+    "ganomaly_consistency_weight, ensemble_fusion_strategy, ensemble_max_score_threshold, "
+    "cnn_autoencoder_weight, anomaly_transformer_weight, ganomaly_weight, vae_weight, "
+    "calibrate_threshold, calibration_min_samples, "
+    "deep_svdd_nu, and deep_svdd_architecture."
 )
 
 _MODEL_HELP = (
@@ -49,9 +55,53 @@ _MODEL_HELP = (
     "    - deep_svdd_max_epochs: maximum Deep SVDD training epochs\n"
     "    - deep_svdd_validation_fraction: holdout fraction used for early stopping\n"
     "    - deep_svdd_pretrain_autoencoder: initialize encoder weights from the autoencoder"
+    "\n  Anomaly Transformer:\n"
+    "    - anomaly_transformer_hidden_dim: hidden width in the encoder and decoder\n"
+    "    - anomaly_transformer_latent_dim: latent bottleneck size\n"
+    "    - anomaly_transformer_attention_weight: attention discrepancy contribution\n"
+    "    - anomaly_transformer_attention_temperature: softmax temperature for feature attention\n"
+    "    - anomaly_transformer_threshold_percentile: validation score cutoff percentile\n"
+    "    - anomaly_transformer_dropout: dropout rate for transformer layers\n"
+    "    - anomaly_transformer_learning_rate: optimizer step size\n"
+    "    - anomaly_transformer_batch_size: minibatch size used during training\n"
+    "    - anomaly_transformer_validation_fraction: holdout fraction used for early stopping\n"
+    "    - anomaly_transformer_max_epochs: maximum training epochs\n"
+    "    - anomaly_transformer_patience: early stopping patience in epochs\n"
+    "    - anomaly_transformer_l2: L2 regularization strength\n"
+    "    - anomaly_transformer_verbose: enable verbose transformer training logs"
+    "\n  GANomaly:\n"
+    "    - ganomaly_hidden_dim: hidden width in the encoder and decoder\n"
+    "    - ganomaly_latent_dim: latent bottleneck size\n"
+    "    - ganomaly_consistency_weight: latent consistency penalty weight\n"
+    "    - ganomaly_threshold_percentile: validation score cutoff percentile\n"
+    "    - ganomaly_dropout: dropout rate for GANomaly layers\n"
+    "    - ganomaly_learning_rate: optimizer step size\n"
+    "    - ganomaly_batch_size: minibatch size used during training\n"
+    "    - ganomaly_validation_fraction: holdout fraction used for early stopping\n"
+    "    - ganomaly_max_epochs: maximum GANomaly training epochs\n"
+    "    - ganomaly_patience: early stopping patience in epochs\n"
+    "    - ganomaly_l2: L2 regularization strength\n"
+    "    - ganomaly_verbose: enable verbose GANomaly training logs"
+    "\n  Variational Autoencoder:\n"
+    "    - vae_hidden_dim: encoder/decoder hidden width (typically 32 to 128)\n"
+    "    - vae_latent_dim: latent space size (typically 8 to 16)\n"
+    "    - vae_beta: KL-divergence regularization strength\n"
+    "    - vae_dropout: dropout rate for hidden layers (typically 0.1 to 0.3)\n"
+    "    - vae_learning_rate: optimizer step size (typically 1e-3 to 1e-4)\n"
+    "    - vae_batch_size: minibatch size used during training\n"
+    "    - vae_validation_fraction: holdout fraction used for early stopping\n"
+    "    - vae_max_epochs: maximum VAE training epochs\n"
+    "    - vae_patience: early stopping patience in epochs\n"
+    "    - vae_l2: L2 regularization strength"
     "\n  Ensemble Fusion:\n"
     "    - ensemble_fusion_strategy: choose 'weighted_average', 'max_score_voting', or 'stacking'\n"
     "    - ensemble_max_score_threshold: component score cutoff used by max-score voting\n"
+    "    - cnn_autoencoder_weight: optional custom weight for the CNN autoencoder in weighted fusion\n"
+    "    - anomaly_transformer_weight: optional custom weight for the Anomaly Transformer in weighted fusion\n"
+    "    - ganomaly_weight: optional custom weight for GANomaly in weighted fusion\n"
+    "    - vae_weight: optional custom weight for the variational autoencoder in weighted fusion\n"
+    "    - calibrate_threshold: enable label-aware threshold calibration during training\n"
+    "    - calibration_min_samples: minimum labeled rows required before calibration runs\n"
     "    - stacking uses a labeled set to train a logistic regression meta-classifier"
 )
 
@@ -138,6 +188,322 @@ def _apply_autoencoder_overrides(config: PreprocessingConfig, args: argparse.Nam
         "autoencoder_l2",
         "autoencoder_random_state",
         "autoencoder_verbose",
+    ]
+    for field_name in field_names:
+        value = getattr(args, field_name, None)
+        if value is not None:
+            setattr(config, field_name, value)
+
+
+def _add_anomaly_transformer_arguments(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--anomaly-transformer-hidden-dim",
+        type=int,
+        default=None,
+        help="Override the Anomaly Transformer hidden layer width.",
+    )
+    parser.add_argument(
+        "--anomaly-transformer-latent-dim",
+        type=int,
+        default=None,
+        help="Override the Anomaly Transformer latent dimension.",
+    )
+    parser.add_argument(
+        "--anomaly-transformer-dropout",
+        type=float,
+        default=None,
+        help="Override the dropout used in the Anomaly Transformer.",
+    )
+    parser.add_argument(
+        "--anomaly-transformer-learning-rate",
+        type=float,
+        default=None,
+        help="Override the Anomaly Transformer learning rate.",
+    )
+    parser.add_argument(
+        "--anomaly-transformer-batch-size",
+        type=int,
+        default=None,
+        help="Override the Anomaly Transformer batch size.",
+    )
+    parser.add_argument(
+        "--anomaly-transformer-attention-weight",
+        type=float,
+        default=None,
+        help="Override the attention discrepancy weight.",
+    )
+    parser.add_argument(
+        "--anomaly-transformer-attention-temperature",
+        type=float,
+        default=None,
+        help="Override the attention softmax temperature.",
+    )
+    parser.add_argument(
+        "--anomaly-transformer-threshold-percentile",
+        type=float,
+        default=None,
+        help="Override the Anomaly Transformer reconstruction threshold percentile.",
+    )
+    parser.add_argument(
+        "--anomaly-transformer-validation-fraction",
+        type=float,
+        default=None,
+        help="Override the Anomaly Transformer validation split.",
+    )
+    parser.add_argument(
+        "--anomaly-transformer-max-epochs",
+        type=int,
+        default=None,
+        help="Override the Anomaly Transformer training epoch budget.",
+    )
+    parser.add_argument(
+        "--anomaly-transformer-patience",
+        type=int,
+        default=None,
+        help="Override the Anomaly Transformer early stopping patience.",
+    )
+    parser.add_argument(
+        "--anomaly-transformer-l2",
+        type=float,
+        default=None,
+        help="Override the Anomaly Transformer L2 regularization strength.",
+    )
+    parser.add_argument(
+        "--anomaly-transformer-random-state",
+        type=int,
+        default=None,
+        help="Override the Anomaly Transformer random seed.",
+    )
+    parser.add_argument(
+        "--anomaly-transformer-verbose",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Enable or disable verbose Anomaly Transformer training logs.",
+    )
+
+
+def _apply_anomaly_transformer_overrides(config: PreprocessingConfig, args: argparse.Namespace) -> None:
+    field_names = [
+        "anomaly_transformer_hidden_dim",
+        "anomaly_transformer_latent_dim",
+        "anomaly_transformer_dropout",
+        "anomaly_transformer_learning_rate",
+        "anomaly_transformer_batch_size",
+        "anomaly_transformer_attention_weight",
+        "anomaly_transformer_attention_temperature",
+        "anomaly_transformer_threshold_percentile",
+        "anomaly_transformer_validation_fraction",
+        "anomaly_transformer_max_epochs",
+        "anomaly_transformer_patience",
+        "anomaly_transformer_l2",
+        "anomaly_transformer_random_state",
+        "anomaly_transformer_verbose",
+    ]
+    for field_name in field_names:
+        value = getattr(args, field_name, None)
+        if value is not None:
+            setattr(config, field_name, value)
+
+
+def _add_ganomaly_arguments(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--ganomaly-hidden-dim",
+        type=int,
+        default=None,
+        help="Override the GANomaly hidden layer width.",
+    )
+    parser.add_argument(
+        "--ganomaly-latent-dim",
+        type=int,
+        default=None,
+        help="Override the GANomaly latent dimension.",
+    )
+    parser.add_argument(
+        "--ganomaly-dropout",
+        type=float,
+        default=None,
+        help="Override the dropout used in GANomaly.",
+    )
+    parser.add_argument(
+        "--ganomaly-learning-rate",
+        type=float,
+        default=None,
+        help="Override the GANomaly learning rate.",
+    )
+    parser.add_argument(
+        "--ganomaly-batch-size",
+        type=int,
+        default=None,
+        help="Override the GANomaly batch size.",
+    )
+    parser.add_argument(
+        "--ganomaly-consistency-weight",
+        type=float,
+        default=None,
+        help="Override the GANomaly latent consistency weight.",
+    )
+    parser.add_argument(
+        "--ganomaly-threshold-percentile",
+        type=float,
+        default=None,
+        help="Override the GANomaly reconstruction threshold percentile.",
+    )
+    parser.add_argument(
+        "--ganomaly-validation-fraction",
+        type=float,
+        default=None,
+        help="Override the GANomaly validation split.",
+    )
+    parser.add_argument(
+        "--ganomaly-max-epochs",
+        type=int,
+        default=None,
+        help="Override the GANomaly training epoch budget.",
+    )
+    parser.add_argument(
+        "--ganomaly-patience",
+        type=int,
+        default=None,
+        help="Override the GANomaly early stopping patience.",
+    )
+    parser.add_argument(
+        "--ganomaly-l2",
+        type=float,
+        default=None,
+        help="Override the GANomaly L2 regularization strength.",
+    )
+    parser.add_argument(
+        "--ganomaly-random-state",
+        type=int,
+        default=None,
+        help="Override the GANomaly random seed.",
+    )
+    parser.add_argument(
+        "--ganomaly-verbose",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Enable or disable verbose GANomaly training logs.",
+    )
+
+
+def _apply_ganomaly_overrides(config: PreprocessingConfig, args: argparse.Namespace) -> None:
+    field_names = [
+        "ganomaly_hidden_dim",
+        "ganomaly_latent_dim",
+        "ganomaly_dropout",
+        "ganomaly_learning_rate",
+        "ganomaly_batch_size",
+        "ganomaly_consistency_weight",
+        "ganomaly_threshold_percentile",
+        "ganomaly_validation_fraction",
+        "ganomaly_max_epochs",
+        "ganomaly_patience",
+        "ganomaly_l2",
+        "ganomaly_random_state",
+        "ganomaly_verbose",
+    ]
+    for field_name in field_names:
+        value = getattr(args, field_name, None)
+        if value is not None:
+            setattr(config, field_name, value)
+
+
+def _add_variational_autoencoder_arguments(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--vae-hidden-dim",
+        type=int,
+        default=None,
+        help="Override the variational autoencoder hidden layer width.",
+    )
+    parser.add_argument(
+        "--vae-latent-dim",
+        type=int,
+        default=None,
+        help="Override the variational autoencoder latent dimension.",
+    )
+    parser.add_argument(
+        "--vae-dropout",
+        type=float,
+        default=None,
+        help="Override the dropout used in the variational autoencoder.",
+    )
+    parser.add_argument(
+        "--vae-learning-rate",
+        type=float,
+        default=None,
+        help="Override the variational autoencoder learning rate.",
+    )
+    parser.add_argument(
+        "--vae-batch-size",
+        type=int,
+        default=None,
+        help="Override the variational autoencoder batch size.",
+    )
+    parser.add_argument(
+        "--vae-beta",
+        type=float,
+        default=None,
+        help="Override the KL regularization strength used by the variational autoencoder.",
+    )
+    parser.add_argument(
+        "--vae-threshold-percentile",
+        type=float,
+        default=None,
+        help="Override the variational autoencoder reconstruction threshold percentile.",
+    )
+    parser.add_argument(
+        "--vae-validation-fraction",
+        type=float,
+        default=None,
+        help="Override the variational autoencoder validation split.",
+    )
+    parser.add_argument(
+        "--vae-max-epochs",
+        type=int,
+        default=None,
+        help="Override the variational autoencoder training epoch budget.",
+    )
+    parser.add_argument(
+        "--vae-patience",
+        type=int,
+        default=None,
+        help="Override the variational autoencoder early stopping patience.",
+    )
+    parser.add_argument(
+        "--vae-l2",
+        type=float,
+        default=None,
+        help="Override the variational autoencoder L2 regularization strength.",
+    )
+    parser.add_argument(
+        "--vae-random-state",
+        type=int,
+        default=None,
+        help="Override the variational autoencoder random seed.",
+    )
+    parser.add_argument(
+        "--vae-verbose",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Enable or disable verbose variational autoencoder training logs.",
+    )
+
+
+def _apply_variational_autoencoder_overrides(config: PreprocessingConfig, args: argparse.Namespace) -> None:
+    field_names = [
+        "vae_hidden_dim",
+        "vae_latent_dim",
+        "vae_dropout",
+        "vae_learning_rate",
+        "vae_batch_size",
+        "vae_beta",
+        "vae_threshold_percentile",
+        "vae_validation_fraction",
+        "vae_max_epochs",
+        "vae_patience",
+        "vae_l2",
+        "vae_random_state",
+        "vae_verbose",
     ]
     for field_name in field_names:
         value = getattr(args, field_name, None)
@@ -270,6 +636,30 @@ def _add_ensemble_fusion_arguments(parser: argparse.ArgumentParser) -> None:
         default=None,
         help="Override the per-model threshold used by max-score voting.",
     )
+    parser.add_argument(
+        "--cnn-autoencoder-weight",
+        type=float,
+        default=None,
+        help="Override the CNN autoencoder contribution inside weighted ensemble fusion.",
+    )
+    parser.add_argument(
+        "--anomaly-transformer-weight",
+        type=float,
+        default=None,
+        help="Override the Anomaly Transformer contribution inside weighted ensemble fusion.",
+    )
+    parser.add_argument(
+        "--ganomaly-weight",
+        type=float,
+        default=None,
+        help="Override the GANomaly contribution inside weighted ensemble fusion.",
+    )
+    parser.add_argument(
+        "--vae-weight",
+        type=float,
+        default=None,
+        help="Override the variational autoencoder contribution inside weighted ensemble fusion.",
+    )
 
 
 def _add_label_arguments(parser: argparse.ArgumentParser) -> None:
@@ -277,6 +667,56 @@ def _add_label_arguments(parser: argparse.ArgumentParser) -> None:
         "--labels-file",
         default=None,
         help="Optional CSV or Parquet file containing binary labels for evaluation.",
+    )
+    parser.add_argument(
+        "--labels-column",
+        default=None,
+        help="Optional column name to read from --labels-file when it contains more than one column.",
+    )
+    parser.add_argument(
+        "--label-column",
+        default=None,
+        help="Optional column in the scored input containing binary labels for evaluation.",
+    )
+
+
+def _add_training_data_source_arguments(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--input",
+        default=None,
+        help="Path to training data (.csv or .parquet). Required unless --synthetic-demo-data is set.",
+    )
+    parser.add_argument(
+        "--synthetic-demo-data",
+        action="store_true",
+        help="Generate a larger synthetic training cohort instead of loading an input file.",
+    )
+    parser.add_argument(
+        "--synthetic-demo-rows",
+        type=int,
+        default=9600,
+        help="Number of rows to generate when --synthetic-demo-data is enabled.",
+    )
+    parser.add_argument(
+        "--synthetic-demo-seed",
+        type=int,
+        default=42,
+        help="Random seed used for synthetic demo data generation.",
+    )
+
+
+def _add_threshold_calibration_argument(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--calibrate-threshold",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Enable or disable label-aware threshold calibration during training.",
+    )
+    parser.add_argument(
+        "--calibration-min-samples",
+        type=int,
+        default=None,
+        help="Minimum labeled rows required before threshold calibration runs.",
     )
     parser.add_argument(
         "--labels-column",
@@ -363,11 +803,22 @@ def _apply_ensemble_fusion_overrides(config: PreprocessingConfig, args: argparse
     field_names = [
         "ensemble_fusion_strategy",
         "ensemble_max_score_threshold",
+        "cnn_autoencoder_weight",
+        "anomaly_transformer_weight",
+        "ganomaly_weight",
+        "vae_weight",
     ]
     for field_name in field_names:
         value = getattr(args, field_name, None)
         if value is not None:
             setattr(config, field_name, value)
+
+
+def _apply_threshold_calibration_overrides(config: PreprocessingConfig, args: argparse.Namespace) -> None:
+    if getattr(args, "calibrate_threshold", None) is not None:
+        config.calibrate_threshold = bool(args.calibrate_threshold)
+    if getattr(args, "calibration_min_samples", None) is not None:
+        config.calibration_min_samples = int(args.calibration_min_samples)
 
 
 def load_config(path: str | None) -> PreprocessingConfig:
@@ -386,16 +837,19 @@ def build_parser() -> argparse.ArgumentParser:
         description="Train and run the rural health anomaly detection pipeline.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=_MODEL_HELP,
+        conflict_handler="resolve",
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     train_parser = subparsers.add_parser(
         "train",
-        help="Train a model from tabular data.",
+        help="Train a model from tabular data with Isolation Forest, SVM, LOF, autoencoder, Anomaly Transformer, GANomaly, VAE, CNN autoencoder, and Deep SVDD.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=_MODEL_HELP,
+        conflict_handler="resolve",
     )
-    train_parser.add_argument("--input", required=True, help="Path to training data (.csv or .parquet).")
+    _add_training_data_source_arguments(train_parser)
+    _add_threshold_calibration_argument(train_parser)
     train_parser.add_argument("--output", required=True, help="Path to save the trained pipeline (.joblib).")
     train_parser.add_argument(
         "--feature-map",
@@ -423,6 +877,9 @@ def build_parser() -> argparse.ArgumentParser:
         help="Optional column name to read from --labels-file when it contains more than one column.",
     )
     _add_autoencoder_arguments(train_parser)
+    _add_anomaly_transformer_arguments(train_parser)
+    _add_ganomaly_arguments(train_parser)
+    _add_variational_autoencoder_arguments(train_parser)
     _add_deep_svdd_arguments(train_parser)
     _add_ensemble_fusion_arguments(train_parser)
 
@@ -433,7 +890,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     export_edge_parser = subparsers.add_parser(
         "export-edge",
-        help="Export the trained ensemble to ONNX artifacts for offline edge inference.",
+        help="Export the trained ensemble to ONNX artifacts for offline edge inference, including autoencoder, VAE, CNN autoencoder, and Deep SVDD artifacts.",
     )
     export_edge_parser.add_argument("--model", required=True, help="Path to a saved pipeline (.joblib).")
     export_edge_parser.add_argument("--output-dir", required=True, help="Directory to write the edge bundle.")
@@ -527,9 +984,23 @@ def build_parser() -> argparse.ArgumentParser:
 def run_train(args: argparse.Namespace) -> None:
     config = load_config(args.config_json)
     _apply_autoencoder_overrides(config, args)
+    _apply_anomaly_transformer_overrides(config, args)
+    _apply_ganomaly_overrides(config, args)
+    _apply_variational_autoencoder_overrides(config, args)
     _apply_deep_svdd_overrides(config, args)
     _apply_ensemble_fusion_overrides(config, args)
-    data = load_tabular_data(args.input)
+    _apply_threshold_calibration_overrides(config, args)
+    if getattr(args, "synthetic_demo_data", False):
+        if getattr(args, "input", None):
+            print("Synthetic demo data enabled; ignoring --input.")
+        data = build_large_training_data(
+            target_rows=int(getattr(args, "synthetic_demo_rows", 9600)),
+            seed=int(getattr(args, "synthetic_demo_seed", 42)),
+        )
+    else:
+        if not getattr(args, "input", None):
+            raise ValueError("Training input is required unless --synthetic-demo-data is set.")
+        data = load_tabular_data(args.input)
     labels = None
     if getattr(args, "labels_file", None):
         labels_frame = load_tabular_data(args.labels_file)
@@ -689,11 +1160,13 @@ def main() -> None:
 
 def train_main() -> None:
     parser = argparse.ArgumentParser(
-        description="Train the rural health anomaly detection pipeline.",
+        description="Train the rural health anomaly detection pipeline with Isolation Forest, SVM, LOF, autoencoder, Anomaly Transformer, GANomaly, VAE, CNN autoencoder, and Deep SVDD.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=_MODEL_HELP,
+        conflict_handler="resolve",
     )
-    parser.add_argument("--input", required=True, help="Path to training data (.csv or .parquet).")
+    _add_training_data_source_arguments(parser)
+    _add_threshold_calibration_argument(parser)
     parser.add_argument("--output", required=True, help="Path to save the trained pipeline (.joblib).")
     parser.add_argument(
         "--feature-map",
@@ -721,6 +1194,9 @@ def train_main() -> None:
         help="Optional column name to read from --labels-file when it contains more than one column.",
     )
     _add_autoencoder_arguments(parser)
+    _add_anomaly_transformer_arguments(parser)
+    _add_ganomaly_arguments(parser)
+    _add_variational_autoencoder_arguments(parser)
     _add_deep_svdd_arguments(parser)
     _add_ensemble_fusion_arguments(parser)
     run_train(parser.parse_args())

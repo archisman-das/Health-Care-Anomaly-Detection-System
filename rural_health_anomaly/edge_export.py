@@ -154,6 +154,65 @@ def _build_autoencoder_model(estimator: Any, *, opset: int, onnx: Any, helper: A
     return helper.make_model(graph, opset_imports=[helper.make_opsetid("", custom_opset)])
 
 
+def _build_variational_autoencoder_model(estimator: Any, *, opset: int, onnx: Any, helper: Any, TensorProto: Any, numpy_helper: Any) -> Any:
+    """Export the deterministic reconstruction path of the VAE for edge inference."""
+
+    input_name = "X"
+    nodes: list[Any] = []
+    initializers: list[Any] = []
+
+    hidden1 = "variational_autoencoder_hidden1"
+    hidden1_relu = "variational_autoencoder_hidden1_relu"
+    latent_mu = "variational_autoencoder_latent_mu"
+    hidden2 = "variational_autoencoder_hidden2"
+    hidden2_relu = "variational_autoencoder_hidden2_relu"
+    output_name = "variational_autoencoder_output"
+    diff_name = "variational_autoencoder_diff"
+    abs_name = "variational_autoencoder_abs"
+    raw_name = "reconstruction_error"
+    score_name = "normalized_score"
+
+    initializers.extend(
+        [
+            numpy_helper.from_array(_as_float32(estimator.weights_[0]), name="variational_autoencoder_W0"),
+            numpy_helper.from_array(_as_float32(estimator.biases_[0]), name="variational_autoencoder_B0"),
+            numpy_helper.from_array(_as_float32(estimator.weights_[1]), name="variational_autoencoder_W_mu"),
+            numpy_helper.from_array(_as_float32(estimator.biases_[1]), name="variational_autoencoder_B_mu"),
+            numpy_helper.from_array(_as_float32(estimator.weights_[3]), name="variational_autoencoder_W2"),
+            numpy_helper.from_array(_as_float32(estimator.biases_[3]), name="variational_autoencoder_B2"),
+            numpy_helper.from_array(_as_float32(estimator.weights_[4]), name="variational_autoencoder_W_out"),
+            numpy_helper.from_array(_as_float32(estimator.biases_[4]), name="variational_autoencoder_B_out"),
+            _scalar_initializer(numpy_helper, "variational_autoencoder_score_mean", float(estimator._training_raw_score_mean_)),
+            _scalar_initializer(numpy_helper, "variational_autoencoder_score_std", _safe_scale(float(estimator._training_raw_score_std_))),
+        ]
+    )
+
+    nodes.append(helper.make_node("Gemm", [input_name, "variational_autoencoder_W0", "variational_autoencoder_B0"], [hidden1], alpha=1.0, beta=1.0))
+    nodes.append(helper.make_node("Relu", [hidden1], [hidden1_relu]))
+    nodes.append(helper.make_node("Gemm", [hidden1_relu, "variational_autoencoder_W_mu", "variational_autoencoder_B_mu"], [latent_mu], alpha=1.0, beta=1.0))
+    nodes.append(helper.make_node("Gemm", [latent_mu, "variational_autoencoder_W2", "variational_autoencoder_B2"], [hidden2], alpha=1.0, beta=1.0))
+    nodes.append(helper.make_node("Relu", [hidden2], [hidden2_relu]))
+    nodes.append(helper.make_node("Gemm", [hidden2_relu, "variational_autoencoder_W_out", "variational_autoencoder_B_out"], [output_name], alpha=1.0, beta=1.0))
+    nodes.append(helper.make_node("Sub", [output_name, input_name], [diff_name]))
+    nodes.append(helper.make_node("Abs", [diff_name], [abs_name]))
+    nodes.append(helper.make_node("ReduceMean", [abs_name], [raw_name], axes=[1], keepdims=0))
+    nodes.append(helper.make_node("Sub", [raw_name, "variational_autoencoder_score_mean"], ["variational_autoencoder_centered_score"]))
+    nodes.append(helper.make_node("Div", ["variational_autoencoder_centered_score", "variational_autoencoder_score_std"], [score_name]))
+
+    graph = helper.make_graph(
+        nodes,
+        "variational_autoencoder_graph",
+        [helper.make_tensor_value_info(input_name, TensorProto.FLOAT, ["batch", None])],
+        [
+            helper.make_tensor_value_info(raw_name, TensorProto.FLOAT, ["batch"]),
+            helper.make_tensor_value_info(score_name, TensorProto.FLOAT, ["batch"]),
+        ],
+        initializer=initializers,
+    )
+    custom_opset = min(opset, 12)
+    return helper.make_model(graph, opset_imports=[helper.make_opsetid("", custom_opset)])
+
+
 def _build_deep_svdd_mlp_model(estimator: Any, *, opset: int, onnx: Any, helper: Any, TensorProto: Any, numpy_helper: Any) -> Any:
     input_name = "X"
     nodes: list[Any] = []
@@ -331,6 +390,7 @@ def export_edge_bundle(pipeline: Any, output_dir: str | Path, *, opset: int = 13
         "feature_names": feature_names,
         "component_stats": getattr(model, "component_stats_", {}),
         "fusion_weights": getattr(model, "fusion_weights_", {}),
+        "risk_scoring_weights": getattr(pipeline, "risk_scoring_weights_", {}),
         "stacking_meta_model": None,
         "artifacts": {},
     }
@@ -356,6 +416,50 @@ def export_edge_bundle(pipeline: Any, output_dir: str | Path, *, opset: int = 13
         manifest["artifacts"]["autoencoder"] = {
             "onnx": autoencoder_path.name,
             "threshold": float(getattr(autoencoder, "threshold_", float("nan"))),
+        }
+
+    if "anomaly_transformer" in model.estimators_:
+        anomaly_transformer = model.estimators_["anomaly_transformer"]
+        anomaly_transformer_path = output_path / "anomaly_transformer.joblib"
+        joblib.dump(anomaly_transformer, anomaly_transformer_path)
+        exported_files["anomaly_transformer_joblib"] = str(anomaly_transformer_path)
+        manifest["artifacts"]["anomaly_transformer"] = {
+            "joblib": anomaly_transformer_path.name,
+            "threshold": float(getattr(anomaly_transformer, "threshold_", float("nan"))),
+            "raw_score_mean": float(getattr(anomaly_transformer, "_training_raw_score_mean_", float("nan"))),
+            "raw_score_std": float(getattr(anomaly_transformer, "_training_raw_score_std_", float("nan"))),
+            "raw_score_mode": "raw_output",
+        }
+
+    if "variational_autoencoder" in model.estimators_:
+        variational_autoencoder = model.estimators_["variational_autoencoder"]
+        variational_autoencoder_path = output_path / "variational_autoencoder.onnx"
+        variational_autoencoder_model = _build_variational_autoencoder_model(
+            variational_autoencoder,
+            opset=opset,
+            onnx=onnx,
+            helper=helper,
+            TensorProto=TensorProto,
+            numpy_helper=numpy_helper,
+        )
+        _save_model(variational_autoencoder_model, variational_autoencoder_path)
+        exported_files["variational_autoencoder_onnx"] = str(variational_autoencoder_path)
+        manifest["artifacts"]["variational_autoencoder"] = {
+            "onnx": variational_autoencoder_path.name,
+            "threshold": float(getattr(variational_autoencoder, "threshold_", float("nan"))),
+        }
+
+    if "ganomaly" in model.estimators_:
+        ganomaly = model.estimators_["ganomaly"]
+        ganomaly_path = output_path / "ganomaly.joblib"
+        joblib.dump(ganomaly, ganomaly_path)
+        exported_files["ganomaly_joblib"] = str(ganomaly_path)
+        manifest["artifacts"]["ganomaly"] = {
+            "joblib": ganomaly_path.name,
+            "threshold": float(getattr(ganomaly, "threshold_", float("nan"))),
+            "raw_score_mean": float(getattr(ganomaly, "_training_raw_score_mean_", float("nan"))),
+            "raw_score_std": float(getattr(ganomaly, "_training_raw_score_std_", float("nan"))),
+            "raw_score_mode": "raw_output",
         }
 
     if "deep_svdd" in model.estimators_:
@@ -386,13 +490,31 @@ def export_edge_bundle(pipeline: Any, output_dir: str | Path, *, opset: int = 13
         manifest["artifacts"]["autoencoder"]["raw_score_mean"] = float(getattr(autoencoder, "_training_raw_score_mean_", float("nan")))
         manifest["artifacts"]["autoencoder"]["raw_score_std"] = float(getattr(autoencoder, "_training_raw_score_std_", float("nan")))
 
+    if "anomaly_transformer" in model.estimators_:
+        anomaly_transformer = model.estimators_["anomaly_transformer"]
+        manifest["artifacts"]["anomaly_transformer"]["raw_score_mean"] = float(
+            getattr(anomaly_transformer, "_training_raw_score_mean_", float("nan"))
+        )
+        manifest["artifacts"]["anomaly_transformer"]["raw_score_std"] = float(
+            getattr(anomaly_transformer, "_training_raw_score_std_", float("nan"))
+        )
+
+    if "variational_autoencoder" in model.estimators_:
+        variational_autoencoder = model.estimators_["variational_autoencoder"]
+        manifest["artifacts"]["variational_autoencoder"]["raw_score_mean"] = float(
+            getattr(variational_autoencoder, "_training_raw_score_mean_", float("nan"))
+        )
+        manifest["artifacts"]["variational_autoencoder"]["raw_score_std"] = float(
+            getattr(variational_autoencoder, "_training_raw_score_std_", float("nan"))
+        )
+
     if getattr(model, "fusion_strategy_", getattr(model, "fusion_strategy", None)) == "stacking" and hasattr(model, "stacking_meta_model_"):
         meta_model = model.stacking_meta_model_
         manifest["stacking_meta_model"] = {
             "classes": [int(value) for value in getattr(meta_model, "classes_", [])],
             "coef": np.asarray(getattr(meta_model, "coef_", np.empty((0, 0))), dtype=float).tolist(),
             "intercept": np.asarray(getattr(meta_model, "intercept_", np.empty((0,))), dtype=float).tolist(),
-            "feature_order": ["isolation_forest", "autoencoder", "deep_svdd"],
+            "feature_order": list(getattr(model, "component_names_", [])),
         }
 
     manifest_path = output_path / "edge_bundle_manifest.json"
@@ -405,7 +527,9 @@ def export_edge_bundle(pipeline: Any, output_dir: str | Path, *, opset: int = 13
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Export the trained anomaly ensemble for edge inference.")
+    parser = argparse.ArgumentParser(
+        description="Export the trained anomaly ensemble for edge inference, including autoencoder, Anomaly Transformer, GANomaly, VAE, CNN autoencoder, and Deep SVDD artifacts."
+    )
     parser.add_argument("--model", required=True, help="Path to the trained pipeline (.joblib).")
     parser.add_argument("--output-dir", required=True, help="Directory to write the ONNX bundle into.")
     parser.add_argument(

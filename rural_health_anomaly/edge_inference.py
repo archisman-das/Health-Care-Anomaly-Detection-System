@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import math
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -14,10 +13,7 @@ import joblib
 import numpy as np
 import pandas as pd
 
-from .training import load_tabular_data
-
-_RISK_BINS = (-math.inf, 0.4, 0.7, math.inf)
-_RISK_LABELS = ("Low", "Medium", "High")
+from .training import _clinical_risk_component, _risk_category_from_score, load_tabular_data
 
 
 @dataclass(frozen=True)
@@ -25,6 +21,7 @@ class EdgeBundle:
     manifest: dict[str, Any]
     preprocessor: Any
     sessions: dict[str, Any]
+    python_models: dict[str, Any]
 
 
 def _require_onnxruntime():
@@ -46,16 +43,20 @@ def load_edge_bundle(bundle_dir: str | Path) -> EdgeBundle:
     preprocessor = joblib.load(bundle_path / "preprocessor.joblib")
 
     sessions: dict[str, Any] = {}
+    python_models: dict[str, Any] = {}
     for name, artifact in manifest.get("artifacts", {}).items():
         onnx_name = artifact.get("onnx")
-        if not onnx_name:
+        joblib_name = artifact.get("joblib")
+        if onnx_name:
+            sessions[name] = ort.InferenceSession(
+                str(bundle_path / onnx_name),
+                providers=["CPUExecutionProvider"],
+            )
             continue
-        sessions[name] = ort.InferenceSession(
-            str(bundle_path / onnx_name),
-            providers=["CPUExecutionProvider"],
-        )
+        if joblib_name:
+            python_models[name] = joblib.load(bundle_path / joblib_name)
 
-    return EdgeBundle(manifest=manifest, preprocessor=preprocessor, sessions=sessions)
+    return EdgeBundle(manifest=manifest, preprocessor=preprocessor, sessions=sessions, python_models=python_models)
 
 
 def _to_2d_float_array(values: Any) -> np.ndarray:
@@ -158,9 +159,21 @@ def score_bundle_frame(bundle: EdgeBundle, data: pd.DataFrame) -> pd.DataFrame:
     for name in bundle.manifest.get("component_names", []):
         session = bundle.sessions.get(name)
         artifact = bundle.manifest.get("artifacts", {}).get(name, {})
-        if session is None:
-            continue
-        raw_component_score = _extract_raw_component_score(session, transformed_array, artifact)
+        if session is not None:
+            raw_component_score = _extract_raw_component_score(session, transformed_array, artifact)
+        else:
+            python_model = bundle.python_models.get(name)
+            if python_model is None or not hasattr(python_model, "score"):
+                continue
+            raw_component_score = np.asarray(python_model.score(transformed_array), dtype=float).reshape(-1)
+            mode = artifact.get("raw_score_mode", "raw_output")
+            if mode == "negative_decision_function":
+                raw_component_score = -raw_component_score
+            raw_mean = float(artifact.get("raw_score_mean", 0.0))
+            raw_std = float(artifact.get("raw_score_std", 1.0))
+            if not np.isfinite(raw_std) or raw_std == 0.0:
+                raw_std = 1.0
+            raw_component_score = (raw_component_score - raw_mean) / raw_std
         stats = bundle.manifest.get("component_stats", {}).get(name, {})
         normalized_component_score = _minmax_scale(
             raw_component_score,
@@ -182,15 +195,15 @@ def score_bundle_frame(bundle: EdgeBundle, data: pd.DataFrame) -> pd.DataFrame:
 
     output["raw_anomaly_score"] = fused_score
     output["anomaly_score"] = fused_score
-    output["risk_level"] = pd.cut(
-        output["anomaly_score"].astype(float),
-        bins=_RISK_BINS,
-        labels=_RISK_LABELS,
-        include_lowest=True,
-        right=False,
-    ).astype(str)
-    output["risk_score"] = output["anomaly_score"]
-    output["alert_triggered"] = output["risk_level"].isin(["Medium", "High"])
+    risk_scoring_weights = bundle.manifest.get("risk_scoring_weights", {})
+    output["clinical_risk_score"] = output.apply(
+        lambda row: _clinical_risk_component(row, anomaly_score=float(row["anomaly_score"]), weights=risk_scoring_weights),
+        axis=1,
+    )
+    output["risk_score"] = output["clinical_risk_score"]
+    output["risk_category"] = output["risk_score"].apply(lambda value: _risk_category_from_score(float(value) / 100.0))
+    output["risk_level"] = output["risk_category"]
+    output["alert_triggered"] = output["risk_category"].isin(["High", "Critical"])
     output["decision_margin"] = decision_margin
     output["anomaly_flag"] = np.where(decision_margin >= 0.0, 1, -1)
     output["is_anomaly"] = output["anomaly_flag"] == -1
@@ -198,7 +211,9 @@ def score_bundle_frame(bundle: EdgeBundle, data: pd.DataFrame) -> pd.DataFrame:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Run offline inference from an exported edge bundle.")
+    parser = argparse.ArgumentParser(
+        description="Run offline inference from an exported edge bundle, including autoencoder, Anomaly Transformer, GANomaly, VAE, CNN autoencoder, and Deep SVDD artifacts."
+    )
     parser.add_argument("--bundle-dir", required=True, help="Directory containing the exported ONNX bundle.")
     parser.add_argument("--input", required=True, help="Input data (.csv or .parquet).")
     parser.add_argument("--output", required=True, help="Path to write the scored CSV output.")

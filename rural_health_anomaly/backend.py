@@ -2,14 +2,17 @@
 
 from __future__ import annotations
 
+import json
 import io
 import os
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 import pandas as pd
 from fastapi import Depends, FastAPI, File, Header, HTTPException, UploadFile, status
 from fastapi.encoders import jsonable_encoder
+from fastapi.middleware.cors import CORSMiddleware
 
 from .feedback import append_feedback_records
 from .training import load_pipeline, score_records
@@ -45,6 +48,23 @@ async def _score_csv_upload(pipeline, file: UploadFile) -> dict[str, Any]:
         "count": int(len(scored)),
         "predictions": jsonable_encoder(scored.to_dict(orient="records")),
     }
+
+
+def _model_metadata_path(model_path: str | Path) -> Path:
+    return Path(model_path).with_suffix(".metadata.json")
+
+
+def _load_model_artifact_metadata(model_path: str | Path) -> dict[str, Any]:
+    metadata_path = _model_metadata_path(model_path)
+    if not metadata_path.exists():
+        return {}
+
+    try:
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+    return metadata if isinstance(metadata, dict) else {}
 
 
 def _build_explanation_rows(
@@ -126,6 +146,222 @@ def _compute_feature_explanation(
     }
 
 
+def _compute_feature_engineering(
+    pipeline,
+    patient: dict[str, Any],
+    *,
+    top_k: int = 25,
+) -> dict[str, Any]:
+    """Return the engineered feature vector used by the backend model."""
+
+    frame = pd.DataFrame([patient])
+    preprocessor = pipeline.named_steps["preprocessor"]
+    transformed = preprocessor.transform(frame)
+    feature_names = list(preprocessor.get_feature_names_out())
+    feature_map = preprocessor.export_feature_map()
+    feature_lookup = feature_map.set_index("final_feature") if not feature_map.empty and "final_feature" in feature_map.columns else None
+
+    transformed_row = transformed[0].tolist() if getattr(transformed, "shape", (0,))[0] else []
+    rows: list[dict[str, Any]] = []
+    for idx, feature_name in enumerate(feature_names[: max(1, int(top_k))]):
+        value = transformed_row[idx] if idx < len(transformed_row) else None
+        row: dict[str, Any] = {
+            "feature": feature_name,
+            "engineered_value": None if value is None else float(value),
+        }
+        if feature_lookup is not None and feature_name in feature_lookup.index:
+            meta = feature_lookup.loc[feature_name]
+            row["source_columns"] = meta["source_columns"]
+            row["feature_type"] = meta.get("feature_type")
+            row["transformation_path"] = meta.get("transformation_path")
+            provenance_depth = meta.get("provenance_depth")
+            row["provenance_depth"] = None if provenance_depth is None else int(provenance_depth)
+        rows.append(jsonable_encoder(row))
+
+    return jsonable_encoder({
+        "feature_count": len(feature_names),
+        "top_k": int(top_k),
+        "transformed_shape": [int(dim) for dim in getattr(transformed, "shape", ())],
+        "engineered_features": rows,
+    })
+
+
+def _compute_data_scaling(
+    pipeline,
+    patient: dict[str, Any],
+    *,
+    top_k: int = 25,
+) -> dict[str, Any]:
+    """Return the scaled numeric inputs that feed the model."""
+
+    frame = pd.DataFrame([patient])
+    preprocessor = pipeline.named_steps["preprocessor"]
+    engineered = preprocessor._prepare_features(frame, fit=False)
+    feature_pipeline = getattr(preprocessor, "feature_pipeline_", None)
+    if feature_pipeline is None or not getattr(preprocessor, "fitted_", False):
+        return jsonable_encoder({
+            "scaler": getattr(preprocessor.config, "scaler", "standard"),
+            "feature_count": 0,
+            "top_k": int(top_k),
+            "scaled_features": [],
+        })
+
+    numeric_cols = list(getattr(preprocessor, "numeric_columns_", []))
+    if not numeric_cols:
+        return jsonable_encoder({
+            "scaler": getattr(preprocessor.config, "scaler", "standard"),
+            "feature_count": 0,
+            "top_k": int(top_k),
+            "scaled_features": [],
+        })
+
+    column_transformer = feature_pipeline.named_steps["preprocessor"]
+    numeric_pipeline = column_transformer.named_transformers_.get("num")
+    if numeric_pipeline is None:
+        return jsonable_encoder({
+            "scaler": getattr(preprocessor.config, "scaler", "standard"),
+            "feature_count": 0,
+            "top_k": int(top_k),
+            "scaled_features": [],
+        })
+
+    raw_numeric = engineered.reindex(columns=numeric_cols)
+    scaled_numeric = numeric_pipeline.transform(raw_numeric)
+    if hasattr(scaled_numeric, "toarray"):
+        scaled_numeric = scaled_numeric.toarray()
+
+    feature_map = preprocessor.export_feature_map()
+    feature_lookup = feature_map.set_index("final_feature") if not feature_map.empty and "final_feature" in feature_map.columns else None
+
+    rows: list[dict[str, Any]] = []
+    for idx, feature_name in enumerate(numeric_cols[: max(1, int(top_k))]):
+        raw_value = raw_numeric.iloc[0, idx] if idx < raw_numeric.shape[1] else None
+        scaled_value = scaled_numeric[0, idx] if idx < scaled_numeric.shape[1] else None
+        row: dict[str, Any] = {
+            "feature": feature_name,
+            "raw_value": None if pd.isna(raw_value) else float(raw_value),
+            "scaled_value": None if scaled_value is None or pd.isna(scaled_value) else float(scaled_value),
+            "scaler": getattr(preprocessor.config, "scaler", "standard"),
+        }
+        if feature_lookup is not None and feature_name in feature_lookup.index:
+            meta = feature_lookup.loc[feature_name]
+            row["source_columns"] = meta["source_columns"]
+            row["feature_type"] = meta.get("feature_type")
+        rows.append(jsonable_encoder(row))
+
+    return jsonable_encoder({
+        "scaler": getattr(preprocessor.config, "scaler", "standard"),
+        "feature_count": len(numeric_cols),
+        "top_k": int(top_k),
+        "input_shape": [int(dim) for dim in getattr(raw_numeric, "shape", ())],
+        "scaled_shape": [int(dim) for dim in getattr(scaled_numeric, "shape", ())],
+        "scaled_features": rows,
+    })
+
+
+def _compute_data_encoding(
+    pipeline,
+    patient: dict[str, Any],
+    *,
+    top_k: int = 25,
+) -> dict[str, Any]:
+    """Return the encoded categorical inputs that feed the model."""
+
+    def _split_encoded_feature_name(feature_name: str, source_columns: Any, feature_type: str) -> tuple[str, str]:
+        source_feature = ""
+        if isinstance(source_columns, list) and source_columns:
+            source_feature = str(source_columns[0])
+        elif isinstance(source_columns, str) and source_columns:
+            source_feature = source_columns.split(",")[0].strip()
+
+        if feature_type == "expanded_multi_value" and "__" in feature_name:
+            base, encoded_value = feature_name.split("__", 1)
+            return base or source_feature, encoded_value
+
+        if source_feature and feature_name.startswith(f"{source_feature}_"):
+            return source_feature, feature_name[len(source_feature) + 1 :]
+
+        if "_" in feature_name:
+            base, encoded_value = feature_name.rsplit("_", 1)
+            return source_feature or base, encoded_value
+
+        return source_feature or feature_name, ""
+
+    frame = pd.DataFrame([patient])
+    preprocessor = pipeline.named_steps["preprocessor"]
+    engineered = preprocessor._prepare_features(frame, fit=False)
+    feature_pipeline = getattr(preprocessor, "feature_pipeline_", None)
+    if feature_pipeline is None or not getattr(preprocessor, "fitted_", False):
+        return jsonable_encoder({
+            "encoder": "one-hot",
+            "feature_count": 0,
+            "top_k": int(top_k),
+            "encoded_features": [],
+        })
+
+    column_transformer = feature_pipeline.named_steps["preprocessor"]
+    pre_encoded_matrix = column_transformer.transform(engineered.reindex(columns=getattr(preprocessor, "feature_columns_", [])))
+    if hasattr(pre_encoded_matrix, "toarray"):
+        pre_encoded_matrix = pre_encoded_matrix.toarray()
+
+    feature_names = list(column_transformer.get_feature_names_out())
+    feature_map = preprocessor.export_feature_map()
+    feature_lookup = feature_map.set_index("final_feature") if not feature_map.empty and "final_feature" in feature_map.columns else None
+
+    encoded_types = {"one_hot", "expanded_multi_value"}
+    rows: list[dict[str, Any]] = []
+    for idx, feature_name in enumerate(feature_names):
+        if len(rows) >= max(1, int(top_k)):
+            break
+        meta = None
+        if feature_lookup is not None and feature_name in feature_lookup.index:
+            meta = feature_lookup.loc[feature_name]
+            feature_type = str(meta.get("feature_type") or "")
+            if feature_type not in encoded_types:
+                continue
+        else:
+            feature_type = ""
+            if "__" not in feature_name and "_" not in feature_name:
+                continue
+
+        value = pre_encoded_matrix[0, idx] if idx < pre_encoded_matrix.shape[1] else None
+        row: dict[str, Any] = {
+            "feature": feature_name,
+            "encoded_value": None if value is None or pd.isna(value) else float(value),
+            "encoder": "one-hot",
+        }
+        if meta is not None:
+            source_feature, category_value = _split_encoded_feature_name(
+                feature_name,
+                meta["source_columns"],
+                str(meta.get("feature_type") or ""),
+            )
+            active = bool(value is not None and not pd.isna(value) and float(value) >= 0.5)
+            row["source_columns"] = meta["source_columns"]
+            row["feature_type"] = meta.get("feature_type")
+            row["transformation_path"] = meta.get("transformation_path")
+            row["source_feature"] = source_feature
+            row["category_value"] = category_value
+            row["explanation"] = (
+                f"{source_feature} = {category_value} because the input selected {category_value}."
+                if active and source_feature and category_value
+                else (
+                    f"{source_feature} = {category_value} is inactive for this record."
+                    if source_feature and category_value
+                    else "Categorical value encoded by the backend."
+                )
+            )
+        rows.append(jsonable_encoder(row))
+
+    return jsonable_encoder({
+        "encoder": "one-hot",
+        "feature_count": len(rows),
+        "top_k": int(top_k),
+        "encoded_shape": [int(dim) for dim in getattr(pre_encoded_matrix, "shape", ())],
+        "encoded_features": rows,
+    })
+
+
 def _explain_most_anomalous_record(
     pipeline,
     frame: pd.DataFrame,
@@ -174,11 +410,51 @@ def _model_metadata(app: FastAPI) -> dict[str, Any]:
     model = app.state.pipeline.named_steps["model"]
     preprocessor = app.state.pipeline.named_steps["preprocessor"]
     return {
+        "model_name": app.state.model_name,
+        "model_version": app.state.model_version,
         "model_path": app.state.model_path,
+        "artifact_sha256": getattr(app.state, "artifact_sha256", None),
         "model_type": type(model).__name__,
         "feature_count": len(getattr(preprocessor, "feature_columns_", [])),
         "feature_output_count": len(preprocessor.get_feature_names_out()) if getattr(preprocessor, "fitted_", False) else None,
     }
+
+
+def _dashboard_data_path() -> Path:
+    return Path(__file__).resolve().parents[1] / "web" / "dashboard-data.json"
+
+
+def _load_dashboard_data_template() -> dict[str, Any]:
+    data_path = _dashboard_data_path()
+    if not data_path.exists():
+        return {}
+    try:
+        payload = json.loads(data_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _dashboard_last_updated() -> str:
+    return datetime.now(timezone.utc).astimezone().strftime("%B %d, %Y %I:%M %p")
+
+
+def _build_dashboard_data(app: FastAPI) -> dict[str, Any]:
+    payload = _load_dashboard_data_template()
+    metadata = _model_metadata(app)
+    feedback_path = Path(app.state.feedback_store_path)
+    feedback_count = 0
+    if feedback_path.exists():
+        with feedback_path.open("r", encoding="utf-8") as handle:
+            feedback_count = sum(1 for line in handle if line.strip())
+
+    for key in ("summary", "riskTiles", "riskLegend", "modelRows", "trend", "distribution", "features", "agreement", "feedback", "runtime"):
+        payload.setdefault(key, [])
+
+    payload["dashboardState"] = "Clinical dashboard ready"
+    payload["lastUpdated"] = _dashboard_last_updated()
+    payload["feedbackCount"] = feedback_count
+    return payload
 
 
 def _csv_upload_openapi_example(summary: str) -> dict[str, Any]:
@@ -239,6 +515,8 @@ def create_app(
 
     resolved_model_path = Path(model_path)
     pipeline = load_pipeline(resolved_model_path)
+    artifact_metadata = _load_model_artifact_metadata(resolved_model_path)
+    pipeline_version = getattr(pipeline, "model_version_", None)
     auth_dependency = _build_token_dependency(auth_token)
 
     app = FastAPI(
@@ -246,7 +524,22 @@ def create_app(
         version="1.0.0",
         description="Real-time anomaly scoring for rural health patient records.",
     )
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=["*"],
+        allow_credentials=False,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
     app.state.pipeline = pipeline
+    app.state.model_name = str(artifact_metadata.get("model_name") or resolved_model_path.stem)
+    app.state.model_version = str(
+        artifact_metadata.get("model_version")
+        or artifact_metadata.get("artifact_version")
+        or pipeline_version
+        or "unknown"
+    )
+    app.state.artifact_sha256 = artifact_metadata.get("artifact_sha256")
     app.state.model_path = str(resolved_model_path)
     app.state.auth_token_enabled = auth_token is not None
     default_feedback_store = resolved_model_path.with_name("feedback_ledger.jsonl")
@@ -266,6 +559,10 @@ def create_app(
             "models": [_model_metadata(app)],
         }
 
+    @app.get("/dashboard-data.json", dependencies=[Depends(auth_dependency)])
+    def dashboard_data() -> dict[str, Any]:
+        return _build_dashboard_data(app)
+
     @app.get("/feedback", dependencies=[Depends(auth_dependency)])
     def feedback_overview() -> dict[str, Any]:
         store_path = Path(app.state.feedback_store_path)
@@ -282,10 +579,20 @@ def create_app(
         return {
             "input": jsonable_encoder(patient),
             "prediction": record,
+            "model_info": {
+                "model_name": app.state.model_name,
+                "model_version": app.state.model_version,
+                "model_type": type(app.state.pipeline.named_steps["model"]).__name__,
+            },
             "anomaly_score": record.get("anomaly_score"),
+            "risk_score": record.get("risk_score"),
+            "risk_category": record.get("risk_category", record.get("risk_level")),
             "risk_level": record.get("risk_level"),
             "alert_triggered": record.get("alert_triggered"),
             "is_anomaly": record.get("is_anomaly"),
+            "feature_engineering": _compute_feature_engineering(app.state.pipeline, patient, top_k=25),
+            "data_scaling": _compute_data_scaling(app.state.pipeline, patient, top_k=25),
+            "data_encoding": _compute_data_encoding(app.state.pipeline, patient, top_k=25),
         }
 
     @app.post("/batch-predict", dependencies=[Depends(auth_dependency)])
@@ -313,10 +620,37 @@ def create_app(
         scored = _score_payload(app.state.pipeline, patient)
         record = jsonable_encoder(scored.iloc[0].to_dict())
         explanation = _compute_feature_explanation(app.state.pipeline, patient, top_k=top_k)
+        feature_engineering = _compute_feature_engineering(app.state.pipeline, patient, top_k=max(25, top_k))
+        data_scaling = _compute_data_scaling(app.state.pipeline, patient, top_k=max(25, top_k))
+        data_encoding = _compute_data_encoding(app.state.pipeline, patient, top_k=max(25, top_k))
         return {
             "input": jsonable_encoder(patient),
             "prediction": record,
+            "model_info": {
+                "model_name": app.state.model_name,
+                "model_version": app.state.model_version,
+                "model_type": type(app.state.pipeline.named_steps["model"]).__name__,
+            },
             "explanation": explanation,
+            "feature_engineering": feature_engineering,
+            "data_scaling": data_scaling,
+            "data_encoding": data_encoding,
+            "risk_score": record.get("risk_score"),
+            "risk_category": record.get("risk_category", record.get("risk_level")),
+        }
+
+    @app.post("/feature-engineering", dependencies=[Depends(auth_dependency)])
+    def feature_engineering(patient: dict[str, Any], top_k: int = 25) -> dict[str, Any]:
+        return {
+            "input": jsonable_encoder(patient),
+            "model_info": {
+                "model_name": app.state.model_name,
+                "model_version": app.state.model_version,
+                "model_type": type(app.state.pipeline.named_steps["model"]).__name__,
+            },
+            "feature_engineering": _compute_feature_engineering(app.state.pipeline, patient, top_k=top_k),
+            "data_scaling": _compute_data_scaling(app.state.pipeline, patient, top_k=top_k),
+            "data_encoding": _compute_data_encoding(app.state.pipeline, patient, top_k=top_k),
         }
 
     @app.post(
@@ -349,7 +683,12 @@ def create_app(
     ) -> dict[str, Any]:
         if not patients:
             raise HTTPException(status_code=400, detail="At least one patient record is required.")
-        return _explain_batch_records(app.state.pipeline, patients, top_k=top_k)
+        result = _explain_batch_records(app.state.pipeline, patients, top_k=top_k)
+        for item, patient in zip(result["results"], patients, strict=False):
+            item["feature_engineering"] = _compute_feature_engineering(app.state.pipeline, patient, top_k=max(25, top_k))
+            item["data_scaling"] = _compute_data_scaling(app.state.pipeline, patient, top_k=max(25, top_k))
+            item["data_encoding"] = _compute_data_encoding(app.state.pipeline, patient, top_k=max(25, top_k))
+        return result
 
     @app.post("/feedback", dependencies=[Depends(auth_dependency)])
     async def feedback(review: dict[str, Any]) -> dict[str, Any]:
@@ -360,6 +699,10 @@ def create_app(
             "path": str(store_path),
             "message": "Feedback recorded for periodic retraining.",
         }
+
+    @app.post("/api/clinician-feedback", dependencies=[Depends(auth_dependency)])
+    async def clinician_feedback_alias(review: dict[str, Any]) -> dict[str, Any]:
+        return await feedback(review)
 
     @app.post("/feedback_batch", dependencies=[Depends(auth_dependency)])
     async def feedback_batch(reviews: list[dict[str, Any]]) -> dict[str, Any]:

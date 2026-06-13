@@ -369,7 +369,13 @@ def build_unsupervised_analysis(
         column
         for column in (
             "isolation_forest_anomaly_score",
+            "one_class_svm_anomaly_score",
+            "local_outlier_factor_anomaly_score",
             "autoencoder_anomaly_score",
+            "anomaly_transformer_anomaly_score",
+            "variational_autoencoder_anomaly_score",
+            "ganomaly_anomaly_score",
+            "cnn_autoencoder_anomaly_score",
             "deep_svdd_anomaly_score",
         )
         if column in scores.columns
@@ -378,6 +384,7 @@ def build_unsupervised_analysis(
     high_disagreement_rows: list[dict[str, Any]] = []
     if len(agreement_columns) >= 2:
         flag_frame = scores[agreement_columns].ge(threshold)
+        component_count = len(agreement_columns)
         pairwise_rates = {
             f"{left}__{right}": float((flag_frame[left] == flag_frame[right]).mean())
             for left, right in combinations(agreement_columns, 2)
@@ -403,9 +410,12 @@ def build_unsupervised_analysis(
             },
             "mean_pairwise_agreement_rate": float(np.mean(list(pairwise_rates.values()))) if pairwise_rates else float("nan"),
             "at_least_two_flag_rate": float((flag_frame.sum(axis=1) >= 2).mean()) if len(agreement_columns) >= 2 else float("nan"),
-            "all_three_flag_rate": float((flag_frame.sum(axis=1) == 3).mean()) if len(agreement_columns) == 3 else float("nan"),
-            "all_three_flag_count": int((flag_frame.sum(axis=1) == 3).sum()) if len(agreement_columns) == 3 else 0,
+            "component_count": component_count,
+            "all_models_flag_rate": float((flag_frame.sum(axis=1) == component_count).mean()),
+            "all_models_flag_count": int((flag_frame.sum(axis=1) == component_count).sum()),
         }
+        agreement["all_three_flag_rate"] = agreement["all_models_flag_rate"]
+        agreement["all_three_flag_count"] = agreement["all_models_flag_count"]
         high_disagreement_rows = _build_high_disagreement_rows(
             scores,
             agreement_columns,
@@ -456,7 +466,13 @@ def _html_report_table(df: pd.DataFrame) -> str:
 def _friendly_model_name(model_name: str) -> str:
     mapping = {
         "isolation_forest_anomaly_score": "Isolation Forest",
+        "one_class_svm_anomaly_score": "One-Class SVM",
+        "local_outlier_factor_anomaly_score": "Local Outlier Factor",
         "autoencoder_anomaly_score": "Autoencoder",
+        "anomaly_transformer_anomaly_score": "Anomaly Transformer",
+        "variational_autoencoder_anomaly_score": "Variational Autoencoder",
+        "ganomaly_anomaly_score": "GANomaly",
+        "cnn_autoencoder_anomaly_score": "CNN Autoencoder",
         "deep_svdd_anomaly_score": "Deep SVDD",
         "anomaly_score": "Ensemble",
     }
@@ -536,7 +552,13 @@ def build_evaluation_report(
         comparison,
         model_order=[
             "isolation_forest_anomaly_score",
+            "one_class_svm_anomaly_score",
+            "local_outlier_factor_anomaly_score",
             "autoencoder_anomaly_score",
+            "anomaly_transformer_anomaly_score",
+            "variational_autoencoder_anomaly_score",
+            "ganomaly_anomaly_score",
+            "cnn_autoencoder_anomaly_score",
             "deep_svdd_anomaly_score",
             "anomaly_score",
         ],
@@ -666,6 +688,7 @@ def build_evaluation_report(
 
     if unsupervised["agreement"]:
         agreement = unsupervised["agreement"]
+        component_count = int(agreement.get("component_count", len(agreement["columns"])))
         summary_lines.extend(
             [
                 "",
@@ -674,8 +697,8 @@ def build_evaluation_report(
                 f"- Compared models: {', '.join(agreement['columns'])}",
                 f"- Pairwise agreement rate: {agreement['mean_pairwise_agreement_rate']:.4f}",
                 f"- At least two models flag rate: {agreement['at_least_two_flag_rate']:.4f}",
-                f"- All three models flag rate: {agreement['all_three_flag_rate']:.4f}",
-                f"- All three models flag count: {agreement['all_three_flag_count']}",
+                f"- All {component_count} models flag rate: {agreement['all_models_flag_rate']:.4f}",
+                f"- All {component_count} models flag count: {agreement['all_models_flag_count']}",
                 "",
                 "### Agreement Matrix",
                 "",
@@ -826,8 +849,8 @@ def build_evaluation_report(
                         f"    <div><strong>Compared models:</strong> {html.escape(', '.join(unsupervised['agreement']['columns']))}</div>",
                         f"    <div><strong>Pairwise agreement rate:</strong> {unsupervised['agreement']['mean_pairwise_agreement_rate']:.4f}</div>",
                         f"    <div><strong>At least two models flag rate:</strong> {unsupervised['agreement']['at_least_two_flag_rate']:.4f}</div>",
-                        f"    <div><strong>All three models flag rate:</strong> {unsupervised['agreement']['all_three_flag_rate']:.4f}</div>",
-                        f"    <div><strong>All three models flag count:</strong> {unsupervised['agreement']['all_three_flag_count']}</div>",
+                        f"    <div><strong>All {int(unsupervised['agreement'].get('component_count', len(unsupervised['agreement']['columns'])))} models flag rate:</strong> {unsupervised['agreement']['all_models_flag_rate']:.4f}</div>",
+                        f"    <div><strong>All {int(unsupervised['agreement'].get('component_count', len(unsupervised['agreement']['columns'])))} models flag count:</strong> {unsupervised['agreement']['all_models_flag_count']}</div>",
                         "    <div><strong>Agreement matrix:</strong></div>",
                         "    <div>",
                         _html_report_table(

@@ -13,6 +13,7 @@ from . import (
     LocalOutlierFactorAnomalyModel,
     OneClassSVMAnomalyModel,
     PreprocessingConfig,
+    VariationalAutoencoder,
 )
 
 
@@ -51,6 +52,7 @@ def main() -> None:
         ("one_class_svm", OneClassSVMAnomalyModel(nu=0.05)),
         ("local_outlier_factor", LocalOutlierFactorAnomalyModel(n_neighbors=2, contamination=0.05)),
         ("autoencoder", DeepAutoencoder(latent_dim=4, max_epochs=5, patience=2, random_state=7)),
+        ("variational_autoencoder", VariationalAutoencoder(hidden_dim=16, latent_dim=4, max_epochs=5, patience=2, random_state=7)),
         ("deep_svdd", DeepSVDD(latent_dim=4, max_epochs=5, pretrain_autoencoder=False, random_state=7)),
     ]
 

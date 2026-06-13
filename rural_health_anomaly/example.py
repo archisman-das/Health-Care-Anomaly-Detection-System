@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 import numpy as np
 import pandas as pd
 
@@ -147,9 +149,142 @@ def build_inference_data() -> pd.DataFrame:
     )
 
 
-def main() -> None:
-    training_df = build_training_data()
-    inference_df = build_inference_data()
+def _jitter_numeric_value(
+    value: Any,
+    rng: np.random.Generator,
+    *,
+    scale: float,
+    lower_bound: float | None = None,
+    upper_bound: float | None = None,
+) -> Any:
+    """Apply a bounded, deterministic jitter to a numeric value."""
+
+    if isinstance(value, (bool, np.bool_)):
+        return value
+    if isinstance(value, (int, np.integer)):
+        candidate = float(value) * (1.0 + rng.normal(0.0, scale))
+        if lower_bound is not None:
+            candidate = max(lower_bound, candidate)
+        if upper_bound is not None:
+            candidate = min(upper_bound, candidate)
+        return int(round(candidate))
+    if isinstance(value, (float, np.floating)):
+        candidate = float(value) * (1.0 + rng.normal(0.0, scale))
+        if lower_bound is not None:
+            candidate = max(lower_bound, candidate)
+        if upper_bound is not None:
+            candidate = min(upper_bound, candidate)
+        return round(candidate, 2)
+    return value
+
+
+def _stagger_timestamp(value: Any, offset_days: int) -> Any:
+    """Shift a timestamp forward to make the synthetic cohort more realistic."""
+
+    try:
+        timestamp = pd.to_datetime(value)
+    except Exception:
+        return value
+    return (timestamp + pd.Timedelta(days=offset_days)).isoformat()
+
+
+def build_synthetic_patient_data(
+    template: pd.DataFrame,
+    *,
+    target_rows: int = 9600,
+    seed: int = 42,
+    patient_prefix: str = "SP",
+) -> pd.DataFrame:
+    """Expand a small template frame into a larger synthetic cohort.
+
+    This is useful when you want the model to see a larger, more varied
+    tabular workload during local development or UI demos.
+    """
+
+    if target_rows <= 0:
+        return template.iloc[0:0].copy()
+
+    rng = np.random.default_rng(seed)
+    rows: list[dict[str, Any]] = []
+    numeric_columns = template.select_dtypes(include=["number"]).columns.tolist()
+    column_bounds: dict[str, tuple[float | None, float | None]] = {
+        "age_years": (0, 110),
+        "sanitation_index": (0.0, 1.0),
+        "nutritional_score": (0, 100),
+        "treatment_response_score": (0.0, 1.0),
+        "drug_adherence_rate": (0.0, 1.0),
+        "spo2_percent": (80.0, 100.0),
+        "body_temperature_c": (35.0, 41.5),
+        "respiratory_rate_bpm": (8.0, 40.0),
+        "weight_kg": (20.0, 200.0),
+        "height_cm": (100.0, 230.0),
+        "bmi_kg_m2": (10.0, 50.0),
+        "glucose_fasting_mg_dl": (40.0, 400.0),
+        "glucose_postprandial_mg_dl": (50.0, 500.0),
+        "hb_g_dl": (5.0, 20.0),
+        "wbc_count_10e9_l": (1.0, 30.0),
+        "platelets_10e9_l": (50.0, 500.0),
+        "hba1c_percent": (3.0, 15.0),
+        "ldl_mg_dl": (20.0, 300.0),
+        "hdl_mg_dl": (10.0, 120.0),
+        "triglycerides_mg_dl": (30.0, 600.0),
+        "alt_u_l": (5.0, 300.0),
+        "ast_u_l": (5.0, 300.0),
+        "bilirubin_mg_dl": (0.1, 5.0),
+        "creatinine_mg_dl": (0.1, 10.0),
+        "bun_mg_dl": (2.0, 80.0),
+        "egfr_ml_min_1_73m2": (1.0, 180.0),
+        "sodium_mmol_l": (120.0, 155.0),
+        "potassium_mmol_l": (2.5, 7.5),
+        "calcium_mg_dl": (6.0, 12.5),
+        "visits_last_90_days": (0, 20),
+        "symptom_duration_days": (0, 120),
+        "readmission_frequency": (0, 20),
+        "distance_to_nearest_facility_km": (0.1, 100.0),
+    }
+
+    for index in range(target_rows):
+        source_row = template.iloc[index % len(template)].to_dict()
+        synthetic_row = dict(source_row)
+        synthetic_row["patient_id"] = f"{patient_prefix}{index + 1:05d}"
+
+        if "recorded_at" in synthetic_row:
+            synthetic_row["recorded_at"] = _stagger_timestamp(
+                synthetic_row["recorded_at"],
+                offset_days=(index // len(template)) * 2 + int(rng.integers(0, 3)),
+            )
+
+        for column in numeric_columns:
+            scale = 0.03 if column in {"age_years", "height_cm"} else 0.08
+            lower_bound, upper_bound = column_bounds.get(column, (None, None))
+            synthetic_row[column] = _jitter_numeric_value(
+                synthetic_row[column],
+                rng,
+                scale=scale,
+                lower_bound=lower_bound,
+                upper_bound=upper_bound,
+            )
+
+        rows.append(synthetic_row)
+
+    return pd.DataFrame(rows)
+
+
+def build_large_training_data(*, target_rows: int = 9600, seed: int = 42) -> pd.DataFrame:
+    """Build a larger synthetic training cohort from the example template."""
+
+    return build_synthetic_patient_data(build_training_data(), target_rows=target_rows, seed=seed, patient_prefix="TR")
+
+
+def build_large_inference_data(*, target_rows: int = 9600, seed: int = 43) -> pd.DataFrame:
+    """Build a larger synthetic inference cohort from the example template."""
+
+    return build_synthetic_patient_data(build_inference_data(), target_rows=target_rows, seed=seed, patient_prefix="IN")
+
+
+def main(*, training_rows: int = 9600, inference_rows: int = 120) -> None:
+    training_df = build_large_training_data(target_rows=training_rows)
+    inference_df = build_large_inference_data(target_rows=inference_rows)
 
     config = PreprocessingConfig(
         interaction_terms=(
