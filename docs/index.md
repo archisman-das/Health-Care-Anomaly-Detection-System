@@ -2,6 +2,9 @@
 
 ## Core References
 
+- [Project Documentation](project_documentation.md)
+- [Model Details Documentation](model_details.md)
+- [Reference Papers](reference.md)
 - [Feature Provenance](feature_provenance.md)
 - [Config Examples](config_examples.md)
 - [Risk Scoring Config Example](risk_scoring_config.example.json)
@@ -11,6 +14,9 @@
 ## Quick Notes
 
 - Use the README for installation and CLI usage.
+- Use the project documentation for the full system overview and workflow details.
+- Use the model details documentation for algorithm-by-algorithm behavior and scoring logic.
+- Use the reference papers page for the research background behind the algorithm families.
 - Use the provenance docs to inspect how schema fields become model features.
 - Use the schema docs to understand the normalized database layout and preprocessing flow.
 - Start from `risk_scoring_config.example.json` when tuning the blended risk score.
