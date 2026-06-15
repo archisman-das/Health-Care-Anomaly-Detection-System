@@ -53,5 +53,18 @@ Files:
 
 Also included:
 
-- `mixed-dataset.csv`: combined tabular dataset with all samples
-- `mixed-manifest.csv`: quick index of every generated file
+- `mixed-dataset.csv`: combined tabular dataset with all samples. Use this when you want one upload-ready CSV that mixes normal and anomalous cases in a single file.
+- `mixed-manifest.csv`: quick index of every generated file with the sample name, format, and clinical pattern it represents.
+
+### `mixed-dataset.csv`
+
+This file is the merged dataset for the mixed lab report folder. It contains the same field set as the individual reports, but each row represents one sample record instead of one report file.
+
+Use it when you want to:
+
+- Train or test the model on a larger tabular file
+- Run split generation for train, validation, and test folders
+- Check how the pipeline behaves on a mixed normal/anomaly dataset
+- Load a single CSV instead of uploading separate report files one by one
+
+The combined file is meant for model experimentation and dashboard testing, not as a clinical source of truth.
