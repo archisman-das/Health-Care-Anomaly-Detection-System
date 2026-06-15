@@ -109,7 +109,14 @@ def _minmax_scale(values: np.ndarray, *, minimum: float, maximum: float) -> np.n
     return (values - minimum) / scale
 
 
-def _fuse_scores(matrix: np.ndarray, manifest: dict[str, Any], component_names: list[str]) -> tuple[np.ndarray, np.ndarray]:
+def _fuse_scores(
+    matrix: np.ndarray,
+    manifest: dict[str, Any],
+    component_names: list[str],
+    *,
+    transformed: np.ndarray | None = None,
+    gate_model: Any | None = None,
+) -> tuple[np.ndarray, np.ndarray]:
     strategy = manifest.get("fusion_strategy", "weighted_average")
     weights_map = {str(key): float(value) for key, value in manifest.get("fusion_weights", {}).items()}
     threshold = float(manifest.get("decision_threshold", 0.5))
@@ -139,6 +146,14 @@ def _fuse_scores(matrix: np.ndarray, manifest: dict[str, Any], component_names: 
         logit = features @ coef.reshape(-1, 1)
         logit = logit.reshape(-1) + float(intercept.reshape(-1)[0])
         fused = 1.0 / (1.0 + np.exp(-logit))
+    elif strategy == "moe":
+        if gate_model is not None and transformed is not None:
+            gate_weights = np.asarray(gate_model.predict_proba(transformed), dtype=float)
+            if gate_weights.ndim != 2 or gate_weights.shape[1] != matrix.shape[1]:
+                raise RuntimeError("MoE gate produced incompatible routing weights.")
+        else:
+            gate_weights = np.full_like(matrix, 1.0 / max(matrix.shape[1], 1), dtype=float)
+        fused = np.sum(matrix * gate_weights, axis=1)
     else:
         raise RuntimeError(f"Unsupported fusion strategy '{strategy}'.")
 
@@ -187,11 +202,23 @@ def score_bundle_frame(bundle: EdgeBundle, data: pd.DataFrame) -> pd.DataFrame:
 
     component_names = [name for name in bundle.manifest.get("component_names", []) if name in component_scores]
     component_matrix = np.column_stack([component_scores[name] for name in component_names])
-    fused_score, decision_margin = _fuse_scores(component_matrix, bundle.manifest, component_names)
+    fused_score, decision_margin = _fuse_scores(
+        component_matrix,
+        bundle.manifest,
+        component_names,
+        transformed=transformed_array,
+        gate_model=bundle.python_models.get("moe_gate"),
+    )
 
     output = data.copy().reset_index(drop=True)
     for name in component_names:
         output[f"{name}_anomaly_score"] = component_scores[name]
+    moe_gate = bundle.python_models.get("moe_gate")
+    if moe_gate is not None and hasattr(moe_gate, "predict_proba"):
+        gate_weights = np.asarray(moe_gate.predict_proba(transformed_array), dtype=float)
+        if gate_weights.ndim == 2 and gate_weights.shape[1] == len(component_names):
+            for idx, name in enumerate(component_names):
+                output[f"{name}_gate_weight"] = gate_weights[:, idx]
 
     output["raw_anomaly_score"] = fused_score
     output["anomaly_score"] = fused_score

@@ -413,6 +413,52 @@ class PreprocessingAndPipelineBuilderTests(unittest.TestCase):
         self.assertTrue(np.all(np.isfinite(scores)))
         self.assertEqual(model.predict(transformed).shape[0], len(self.df))
 
+    def test_parallel_ensemble_uses_moe_gate_with_labels(self):
+        config = PreprocessingConfig(
+            apply_pca=False,
+            ensemble_fusion_strategy="moe",
+            moe_gate_hidden_dim=16,
+            moe_gate_max_epochs=25,
+            moe_gate_patience=5,
+        )
+        labels = np.array([0, 0, 1], dtype=int)
+        pipeline = build_anomaly_pipeline(config)
+        pipeline.fit(self.df, labels)
+
+        transformed = pipeline.named_steps["preprocessor"].transform(self.df)
+        model = pipeline.named_steps["model"]
+        fused_scores = model.raw_anomaly_score(transformed)
+        gate_weights = model.gate_weights(transformed)
+
+        self.assertEqual(model.fusion_strategy_, "moe")
+        self.assertTrue(hasattr(model, "moe_gate_"))
+        self.assertEqual(getattr(model, "moe_gate_training_signal_", None), "label_alignment")
+        self.assertEqual(gate_weights.shape[1], len(model.component_names_))
+        np.testing.assert_allclose(gate_weights.sum(axis=1).to_numpy(dtype=float), np.ones(len(self.df)), rtol=1e-6, atol=1e-6)
+        self.assertTrue(np.all((fused_scores >= 0.0) & (fused_scores <= 1.0)))
+        self.assertEqual(model.predict(transformed).shape[0], len(self.df))
+
+    def test_parallel_ensemble_uses_moe_gate_without_labels(self):
+        config = PreprocessingConfig(
+            apply_pca=False,
+            ensemble_fusion_strategy="moe",
+            moe_gate_hidden_dim=16,
+            moe_gate_max_epochs=25,
+            moe_gate_patience=5,
+        )
+        pipeline = build_anomaly_pipeline(config)
+        pipeline.fit(self.df)
+
+        transformed = pipeline.named_steps["preprocessor"].transform(self.df)
+        model = pipeline.named_steps["model"]
+        gate_weights = model.gate_weights(transformed)
+
+        self.assertEqual(model.fusion_strategy_, "moe")
+        self.assertTrue(hasattr(model, "moe_gate_"))
+        self.assertEqual(getattr(model, "moe_gate_training_signal_", None), "disagreement_routing")
+        self.assertEqual(gate_weights.shape[0], len(self.df))
+        np.testing.assert_allclose(gate_weights.sum(axis=1).to_numpy(dtype=float), np.ones(len(self.df)), rtol=1e-6, atol=1e-6)
+
     def test_threshold_calibration_prefers_high_f1_cutoffs(self):
         scores = np.array([0.1, 0.2, 0.35, 0.8, 0.9], dtype=float)
         labels = np.array([0, 0, 0, 1, 1], dtype=int)

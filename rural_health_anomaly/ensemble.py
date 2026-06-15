@@ -9,6 +9,7 @@ import numpy as np
 import pandas as pd
 from sklearn.base import BaseEstimator, OutlierMixin, clone
 from sklearn.linear_model import LogisticRegression
+from sklearn.model_selection import train_test_split
 from sklearn.utils.parallel import Parallel, delayed
 
 from .autoencoder import DeepAutoencoder
@@ -62,6 +63,19 @@ def _minmax_scale(scores: np.ndarray) -> tuple[np.ndarray, float, float]:
         scale = 1.0
     scaled = (scores - minimum) / scale
     return np.clip(scaled, 0.0, 1.0), minimum, maximum
+
+
+def _softmax(logits: np.ndarray) -> np.ndarray:
+    shifted = logits - np.max(logits, axis=1, keepdims=True)
+    exp = np.exp(shifted)
+    return exp / np.clip(np.sum(exp, axis=1, keepdims=True), 1e-12, None)
+
+
+def _normalize_rows(matrix: np.ndarray) -> np.ndarray:
+    matrix = np.asarray(matrix, dtype=float)
+    row_sums = np.sum(matrix, axis=1, keepdims=True)
+    row_sums = np.where(~np.isfinite(row_sums) | (row_sums <= 0.0), 1.0, row_sums)
+    return matrix / row_sums
 
 
 def _coerce_binary_labels(y: Any) -> np.ndarray:
@@ -121,6 +135,200 @@ def _calibrate_threshold_from_scores(scores: np.ndarray, y_true: np.ndarray, *, 
     return best_threshold, best_metrics
 
 
+class _MoEGatingNetwork(BaseEstimator):
+    """Lightweight neural gate that routes each sample to detector experts."""
+
+    def __init__(
+        self,
+        *,
+        hidden_dim: int = 32,
+        dropout: float = 0.1,
+        learning_rate: float = 1e-3,
+        batch_size: int = 32,
+        max_epochs: int = 80,
+        patience: int = 10,
+        l2: float = 1e-5,
+        random_state: int = 42,
+        verbose: bool = False,
+    ):
+        self.hidden_dim = hidden_dim
+        self.dropout = dropout
+        self.learning_rate = learning_rate
+        self.batch_size = batch_size
+        self.max_epochs = max_epochs
+        self.patience = patience
+        self.l2 = l2
+        self.random_state = random_state
+        self.verbose = verbose
+
+    def _initialize_parameters(self, n_features: int, n_experts: int) -> None:
+        rng = np.random.default_rng(self.random_state)
+        hidden_scale = np.sqrt(2.0 / max(n_features, 1))
+        output_scale = np.sqrt(2.0 / max(self.hidden_dim, 1))
+
+        self.weights_input_ = rng.normal(0.0, hidden_scale, size=(n_features, self.hidden_dim))
+        self.bias_input_ = np.zeros(self.hidden_dim, dtype=float)
+        self.weights_output_ = rng.normal(0.0, output_scale, size=(self.hidden_dim, n_experts))
+        self.bias_output_ = np.zeros(n_experts, dtype=float)
+
+        self._adam_state_ = {
+            "step": 0,
+            "m_input": np.zeros_like(self.weights_input_),
+            "v_input": np.zeros_like(self.weights_input_),
+            "m_bias_input": np.zeros_like(self.bias_input_),
+            "v_bias_input": np.zeros_like(self.bias_input_),
+            "m_output": np.zeros_like(self.weights_output_),
+            "v_output": np.zeros_like(self.weights_output_),
+            "m_bias_output": np.zeros_like(self.bias_output_),
+            "v_bias_output": np.zeros_like(self.bias_output_),
+        }
+
+    def _forward(
+        self,
+        X: np.ndarray,
+        *,
+        training: bool,
+        rng: np.random.Generator | None = None,
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray | None, np.ndarray]:
+        hidden_linear = X @ self.weights_input_ + self.bias_input_
+        hidden = np.maximum(hidden_linear, 0.0)
+        dropout_mask = None
+        if training and self.dropout > 0.0:
+            keep_prob = 1.0 - float(self.dropout)
+            if keep_prob <= 0.0:
+                raise ValueError("dropout must be less than 1.0")
+            generator = rng or np.random.default_rng(self.random_state)
+            dropout_mask = (generator.random(hidden.shape) < keep_prob).astype(float) / keep_prob
+            hidden = hidden * dropout_mask
+        logits = hidden @ self.weights_output_ + self.bias_output_
+        probs = _softmax(logits)
+        return hidden_linear, hidden, dropout_mask, probs
+
+    def _loss(self, targets: np.ndarray, probs: np.ndarray) -> float:
+        clipped = np.clip(probs, 1e-12, 1.0)
+        return float(-np.mean(np.sum(targets * np.log(clipped), axis=1)))
+
+    def _apply_adam(self, grad_input: np.ndarray, grad_bias_input: np.ndarray, grad_output: np.ndarray, grad_bias_output: np.ndarray) -> None:
+        state = self._adam_state_
+        state["step"] += 1
+        beta1, beta2, eps = 0.9, 0.999, 1e-8
+        step = state["step"]
+
+        def update(param: np.ndarray, grad: np.ndarray, m_key: str, v_key: str) -> np.ndarray:
+            state[m_key] = beta1 * state[m_key] + (1.0 - beta1) * grad
+            state[v_key] = beta2 * state[v_key] + (1.0 - beta2) * (grad**2)
+            m_hat = state[m_key] / (1.0 - beta1**step)
+            v_hat = state[v_key] / (1.0 - beta2**step)
+            return param - self.learning_rate * m_hat / (np.sqrt(v_hat) + eps)
+
+        self.weights_input_ = update(self.weights_input_, grad_input, "m_input", "v_input")
+        self.bias_input_ = update(self.bias_input_, grad_bias_input, "m_bias_input", "v_bias_input")
+        self.weights_output_ = update(self.weights_output_, grad_output, "m_output", "v_output")
+        self.bias_output_ = update(self.bias_output_, grad_bias_output, "m_bias_output", "v_bias_output")
+
+    def fit(self, X, y=None):
+        X = _ensure_2d_array(X)
+        targets = np.asarray(y, dtype=float)
+        if targets.ndim != 2:
+            raise ValueError("MoE gating targets must be a 2D array.")
+        if targets.shape[0] != X.shape[0]:
+            raise ValueError("MoE gating targets must align with X.")
+        if targets.shape[1] < 2:
+            raise ValueError("MoE gating requires at least two experts.")
+
+        targets = np.clip(targets, 0.0, None)
+        targets = _normalize_rows(targets)
+        self.n_features_in_ = X.shape[1]
+        self.n_experts_ = targets.shape[1]
+        self._initialize_parameters(self.n_features_in_, self.n_experts_)
+
+        if 0.0 < self.batch_size:
+            batch_size = max(1, min(int(self.batch_size), X.shape[0]))
+        else:
+            batch_size = max(1, X.shape[0])
+
+        if X.shape[0] >= 5:
+            X_train, X_val, y_train, y_val = train_test_split(
+                X,
+                targets,
+                test_size=min(max(0.2, 1.0 / max(X.shape[0], 5)), 0.5),
+                random_state=self.random_state,
+                shuffle=True,
+            )
+        else:
+            X_train, X_val, y_train, y_val = X, X, targets, targets
+
+        rng = np.random.default_rng(self.random_state)
+        best_state: dict[str, np.ndarray] | None = None
+        best_val_loss = float("inf")
+        stalled_epochs = 0
+        self.history_: list[dict[str, float]] = []
+
+        for epoch in range(int(self.max_epochs)):
+            indices = rng.permutation(X_train.shape[0])
+            for start in range(0, X_train.shape[0], batch_size):
+                batch_idx = indices[start : start + batch_size]
+                batch_X = X_train[batch_idx]
+                batch_y = y_train[batch_idx]
+                hidden_linear, hidden, dropout_mask, probs = self._forward(batch_X, training=True, rng=rng)
+
+                grad_logits = (probs - batch_y) / float(max(batch_X.shape[0], 1))
+                grad_output = hidden.T @ grad_logits + self.l2 * self.weights_output_
+                grad_bias_output = grad_logits.sum(axis=0)
+                grad_hidden = grad_logits @ self.weights_output_.T
+                if dropout_mask is not None:
+                    grad_hidden = grad_hidden * dropout_mask
+                grad_hidden = grad_hidden * (hidden_linear > 0.0).astype(float)
+                grad_input = batch_X.T @ grad_hidden + self.l2 * self.weights_input_
+                grad_bias_input = grad_hidden.sum(axis=0)
+
+                self._apply_adam(grad_input, grad_bias_input, grad_output, grad_bias_output)
+
+            _, _, _, train_probs = self._forward(X_train, training=False)
+            _, _, _, val_probs = self._forward(X_val, training=False)
+            train_loss = self._loss(y_train, train_probs)
+            val_loss = self._loss(y_val, val_probs)
+            self.history_.append({"epoch": float(epoch), "train_loss": train_loss, "val_loss": val_loss})
+
+            if self.verbose:
+                print(f"[MoE Gate] epoch={epoch} train_loss={train_loss:.6f} val_loss={val_loss:.6f}")
+
+            if val_loss < best_val_loss - 1e-6:
+                best_val_loss = val_loss
+                best_state = {
+                    "weights_input": self.weights_input_.copy(),
+                    "bias_input": self.bias_input_.copy(),
+                    "weights_output": self.weights_output_.copy(),
+                    "bias_output": self.bias_output_.copy(),
+                }
+                stalled_epochs = 0
+            else:
+                stalled_epochs += 1
+                if stalled_epochs >= int(self.patience):
+                    break
+
+        if best_state is not None:
+            self.weights_input_ = best_state["weights_input"].copy()
+            self.bias_input_ = best_state["bias_input"].copy()
+            self.weights_output_ = best_state["weights_output"].copy()
+            self.bias_output_ = best_state["bias_output"].copy()
+
+        _, _, _, train_probs = self._forward(X, training=False)
+        self.training_routing_entropy_ = float(-np.mean(np.sum(train_probs * np.log(np.clip(train_probs, 1e-12, 1.0)), axis=1)))
+        self.fitted_ = True
+        return self
+
+    def predict_proba(self, X) -> np.ndarray:
+        if not hasattr(self, "weights_input_"):
+            raise RuntimeError("MoE gate must be fit before scoring.")
+        X = _ensure_2d_array(X)
+        _, _, _, probs = self._forward(X, training=False)
+        return probs
+
+    def gate_weights(self, X) -> np.ndarray:
+        return self.predict_proba(X)
+
+
 class ParallelAnomalyEnsemble(BaseEstimator, OutlierMixin):
     """Fit nine anomaly detectors in parallel and fuse their scores."""
 
@@ -134,6 +342,15 @@ class ParallelAnomalyEnsemble(BaseEstimator, OutlierMixin):
         calibrate_threshold: bool = True,
         calibration_min_samples: int = 25,
         fusion_weights: dict[str, float] | None = None,
+        moe_gate_hidden_dim: int = 32,
+        moe_gate_dropout: float = 0.1,
+        moe_gate_learning_rate: float = 1e-3,
+        moe_gate_batch_size: int = 32,
+        moe_gate_max_epochs: int = 80,
+        moe_gate_patience: int = 10,
+        moe_gate_l2: float = 1e-5,
+        moe_gate_random_state: int = 42,
+        moe_gate_verbose: bool = False,
         isolation_forest_n_estimators: int = 300,
         isolation_forest_max_samples: int | str = "auto",
         isolation_forest_max_features: float = 1.0,
@@ -233,6 +450,15 @@ class ParallelAnomalyEnsemble(BaseEstimator, OutlierMixin):
         self.calibrate_threshold = calibrate_threshold
         self.calibration_min_samples = calibration_min_samples
         self.fusion_weights = fusion_weights
+        self.moe_gate_hidden_dim = moe_gate_hidden_dim
+        self.moe_gate_dropout = moe_gate_dropout
+        self.moe_gate_learning_rate = moe_gate_learning_rate
+        self.moe_gate_batch_size = moe_gate_batch_size
+        self.moe_gate_max_epochs = moe_gate_max_epochs
+        self.moe_gate_patience = moe_gate_patience
+        self.moe_gate_l2 = moe_gate_l2
+        self.moe_gate_random_state = moe_gate_random_state
+        self.moe_gate_verbose = moe_gate_verbose
         self.isolation_forest_n_estimators = isolation_forest_n_estimators
         self.isolation_forest_max_samples = isolation_forest_max_samples
         self.isolation_forest_max_features = isolation_forest_max_features
@@ -477,6 +703,59 @@ class ParallelAnomalyEnsemble(BaseEstimator, OutlierMixin):
         fitted = _fit_estimator(estimator, X)
         return name, fitted
 
+    def _build_moe_targets(self, component_matrix: np.ndarray, labels: np.ndarray | None) -> tuple[np.ndarray, str]:
+        if labels is not None:
+            labels_binary = _coerce_binary_labels(labels)
+            if labels_binary.shape[0] != component_matrix.shape[0]:
+                raise ValueError("MoE labels must have the same number of rows as X.")
+            positive_signal = component_matrix
+            negative_signal = 1.0 - component_matrix
+            targets = np.where(labels_binary[:, None] == 1, positive_signal, negative_signal)
+            signal_mode = "label_alignment"
+        else:
+            consensus = np.mean(component_matrix, axis=1, keepdims=True)
+            targets = np.abs(component_matrix - consensus)
+            signal_mode = "disagreement_routing"
+
+        targets = np.asarray(targets, dtype=float)
+        zero_rows = np.sum(targets, axis=1, keepdims=True) <= 0.0
+        if np.any(zero_rows):
+            targets = targets.copy()
+            targets[zero_rows[:, 0]] = 1.0
+        return _normalize_rows(targets), signal_mode
+
+    def _fit_moe_gate(self, X: np.ndarray, component_matrix: np.ndarray, labels: np.ndarray | None):
+        gate_targets, signal_mode = self._build_moe_targets(component_matrix, labels)
+        gate = _MoEGatingNetwork(
+            hidden_dim=self.moe_gate_hidden_dim,
+            dropout=self.moe_gate_dropout,
+            learning_rate=self.moe_gate_learning_rate,
+            batch_size=self.moe_gate_batch_size,
+            max_epochs=self.moe_gate_max_epochs,
+            patience=self.moe_gate_patience,
+            l2=self.moe_gate_l2,
+            random_state=self.moe_gate_random_state,
+            verbose=self.moe_gate_verbose,
+        )
+        gate.fit(X, gate_targets)
+        gate.training_signal_ = signal_mode
+        gate.component_names_ = list(self.component_names_)
+        return gate, signal_mode
+
+    def _moe_gate_weights(self, X: np.ndarray) -> np.ndarray:
+        if not hasattr(self, "moe_gate_"):
+            raise RuntimeError("MoE gate must be fit before scoring.")
+        weights = np.asarray(self.moe_gate_.predict_proba(X), dtype=float)
+        if weights.ndim != 2 or weights.shape[1] != len(self.component_names_):
+            raise RuntimeError("MoE gate produced incompatible routing weights.")
+        return weights
+
+    def gate_weights(self, X) -> pd.DataFrame:
+        if not hasattr(self, "moe_gate_"):
+            raise RuntimeError("MoE gate is only available when fusion_strategy='moe'.")
+        matrix = self._moe_gate_weights(_ensure_2d_array(X))
+        return pd.DataFrame(matrix, columns=[f"{name}_gate_weight" for name in self.component_names_])
+
     def fit(self, X, y=None):
         X = _ensure_2d_array(X)
         base_estimators = self._build_estimators()
@@ -498,9 +777,9 @@ class ParallelAnomalyEnsemble(BaseEstimator, OutlierMixin):
 
         component_matrix = np.column_stack(component_anomaly_scores)
         self.fusion_strategy_ = self.fusion_strategy
-        if self.fusion_strategy_ not in {"weighted_average", "max_score_voting", "stacking"}:
+        if self.fusion_strategy_ not in {"weighted_average", "max_score_voting", "stacking", "moe"}:
             raise ValueError(
-                "fusion_strategy must be 'weighted_average', 'max_score_voting', or 'stacking'"
+                "fusion_strategy must be 'weighted_average', 'max_score_voting', 'stacking', or 'moe'"
             )
 
         self.fusion_weights_ = self._resolve_fusion_weights()
@@ -510,6 +789,10 @@ class ParallelAnomalyEnsemble(BaseEstimator, OutlierMixin):
         elif self.fusion_strategy_ == "max_score_voting":
             fused = np.max(component_matrix, axis=1)
             self.offset_ = float(self.max_score_threshold)
+        elif self.fusion_strategy_ == "moe":
+            self.moe_gate_, self.moe_gate_training_signal_ = self._fit_moe_gate(X, component_matrix, labels)
+            fused = np.sum(component_matrix * self._moe_gate_weights(X), axis=1)
+            self.offset_ = float(np.quantile(fused, 1 - self.contamination))
         else:
             if labels is None:
                 raise ValueError("Stacking fusion requires labeled training targets passed to fit(X, y).")
@@ -529,7 +812,7 @@ class ParallelAnomalyEnsemble(BaseEstimator, OutlierMixin):
         should_calibrate = (
             self.calibrate_threshold
             and labels is not None
-            and self.fusion_strategy_ in {"weighted_average", "stacking"}
+            and self.fusion_strategy_ in {"weighted_average", "stacking", "moe"}
             and labels.shape[0] >= int(self.calibration_min_samples)
             and np.unique(labels).size > 1
         )
@@ -597,6 +880,9 @@ class ParallelAnomalyEnsemble(BaseEstimator, OutlierMixin):
             return self.stacking_meta_model_.predict_proba(features)[:, 1]
         if self.fusion_strategy_ == "max_score_voting":
             return np.max(matrix, axis=1)
+        if self.fusion_strategy_ == "moe":
+            gate_weights = self._moe_gate_weights(_ensure_2d_array(X))
+            return np.sum(matrix * gate_weights, axis=1)
         weights = np.array([self.fusion_weights_[name] for name in self.component_names_], dtype=float)
         return matrix @ weights
 

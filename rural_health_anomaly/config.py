@@ -34,6 +34,15 @@ class PreprocessingConfig:
     calibrate_threshold: bool = True
     calibration_min_samples: int = 25
     ensemble_fusion_weights: dict[str, float] | None = None
+    moe_gate_hidden_dim: int = 32
+    moe_gate_dropout: float = 0.1
+    moe_gate_learning_rate: float = 1e-3
+    moe_gate_batch_size: int = 32
+    moe_gate_max_epochs: int = 80
+    moe_gate_patience: int = 10
+    moe_gate_l2: float = 1e-5
+    moe_gate_random_state: int = 42
+    moe_gate_verbose: bool = False
     cnn_autoencoder_weight: float | None = None
     anomaly_transformer_weight: float | None = None
     vae_weight: float | None = None

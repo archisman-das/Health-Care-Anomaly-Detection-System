@@ -33,6 +33,8 @@ _CONFIG_HELP = (
     "ganomaly_consistency_weight, ensemble_fusion_strategy, ensemble_max_score_threshold, "
     "cnn_autoencoder_weight, anomaly_transformer_weight, ganomaly_weight, vae_weight, "
     "calibrate_threshold, calibration_min_samples, "
+    "moe_gate_hidden_dim, moe_gate_dropout, moe_gate_learning_rate, moe_gate_batch_size, "
+    "moe_gate_max_epochs, moe_gate_patience, moe_gate_l2, moe_gate_random_state, moe_gate_verbose, "
     "deep_svdd_nu, and deep_svdd_architecture."
 )
 
@@ -97,7 +99,7 @@ _MODEL_HELP = (
     "    - vae_patience: early stopping patience in epochs\n"
     "    - vae_l2: L2 regularization strength"
     "\n  Ensemble Fusion:\n"
-    "    - ensemble_fusion_strategy: choose 'weighted_average', 'max_score_voting', or 'stacking'\n"
+    "    - ensemble_fusion_strategy: choose 'weighted_average', 'max_score_voting', 'stacking', or 'moe'\n"
     "    - ensemble_max_score_threshold: component score cutoff used by max-score voting\n"
     "    - cnn_autoencoder_weight: optional custom weight for the CNN autoencoder in weighted fusion\n"
     "    - anomaly_transformer_weight: optional custom weight for the Anomaly Transformer in weighted fusion\n"
@@ -105,6 +107,15 @@ _MODEL_HELP = (
     "    - vae_weight: optional custom weight for the variational autoencoder in weighted fusion\n"
     "    - calibrate_threshold: enable label-aware threshold calibration during training\n"
     "    - calibration_min_samples: minimum labeled rows required before calibration runs\n"
+    "    - moe_gate_hidden_dim: hidden width for the neural routing gate\n"
+    "    - moe_gate_dropout: dropout rate used by the gating network\n"
+    "    - moe_gate_learning_rate: learning rate for the gating network\n"
+    "    - moe_gate_batch_size: batch size used for gate training\n"
+    "    - moe_gate_max_epochs: maximum gate training epochs\n"
+    "    - moe_gate_patience: early stopping patience for the gate\n"
+    "    - moe_gate_l2: L2 regularization strength for the gate\n"
+    "    - moe_gate_random_state: random seed for the gate\n"
+    "    - moe_gate_verbose: enable or disable verbose gate training logs\n"
     "    - stacking uses a labeled set to train a logistic regression meta-classifier"
 )
 
@@ -629,7 +640,7 @@ def _apply_deep_svdd_overrides(config: PreprocessingConfig, args: argparse.Names
 def _add_ensemble_fusion_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--ensemble-fusion-strategy",
-        choices=("weighted_average", "max_score_voting", "stacking"),
+        choices=("weighted_average", "max_score_voting", "stacking", "moe"),
         default=None,
         help="Override how component scores are fused into the final ensemble score.",
     )

@@ -777,6 +777,11 @@ def score_records(pipeline, data: pd.DataFrame) -> pd.DataFrame:
     output = data.copy()
     if hasattr(model, "score_components"):
         output = pd.concat([output, model.score_components(transformed)], axis=1)
+    if hasattr(model, "gate_weights"):
+        try:
+            output = pd.concat([output, model.gate_weights(transformed)], axis=1)
+        except Exception:
+            pass
     if hasattr(model, "estimators_") and "autoencoder" in model.estimators_:
         autoencoder = model.estimators_["autoencoder"]
         output["autoencoder_reconstruction_error"] = autoencoder.reconstruction_error(transformed)

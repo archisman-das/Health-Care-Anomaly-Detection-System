@@ -392,6 +392,7 @@ def export_edge_bundle(pipeline: Any, output_dir: str | Path, *, opset: int = 13
         "fusion_weights": getattr(model, "fusion_weights_", {}),
         "risk_scoring_weights": getattr(pipeline, "risk_scoring_weights_", {}),
         "stacking_meta_model": None,
+        "moe_gate": None,
         "artifacts": {},
     }
 
@@ -515,6 +516,21 @@ def export_edge_bundle(pipeline: Any, output_dir: str | Path, *, opset: int = 13
             "coef": np.asarray(getattr(meta_model, "coef_", np.empty((0, 0))), dtype=float).tolist(),
             "intercept": np.asarray(getattr(meta_model, "intercept_", np.empty((0,))), dtype=float).tolist(),
             "feature_order": list(getattr(model, "component_names_", [])),
+        }
+
+    if getattr(model, "fusion_strategy_", getattr(model, "fusion_strategy", None)) == "moe" and hasattr(model, "moe_gate_"):
+        moe_gate = model.moe_gate_
+        moe_gate_path = output_path / "moe_gate.joblib"
+        joblib.dump(moe_gate, moe_gate_path)
+        exported_files["moe_gate_joblib"] = str(moe_gate_path)
+        manifest["moe_gate"] = {
+            "joblib": moe_gate_path.name,
+            "training_signal": getattr(moe_gate, "training_signal_", getattr(model, "moe_gate_training_signal_", "unknown")),
+            "feature_order": list(getattr(model, "component_names_", [])),
+        }
+        manifest["artifacts"]["moe_gate"] = {
+            "joblib": moe_gate_path.name,
+            "training_signal": getattr(moe_gate, "training_signal_", getattr(model, "moe_gate_training_signal_", "unknown")),
         }
 
     manifest_path = output_path / "edge_bundle_manifest.json"

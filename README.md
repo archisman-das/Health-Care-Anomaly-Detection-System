@@ -291,6 +291,7 @@ The project compares multiple detectors, including:
 - CNN Autoencoder
 - Anomaly Transformer
 - Deep SVDD
+- Mixture-of-Experts gate
 
 The model comparison views show:
 
@@ -298,6 +299,7 @@ The model comparison views show:
 - Precision
 - Recall
 - F1
+- Gate weights for MoE runs
 - Latency
 - Memory
 - Family and band

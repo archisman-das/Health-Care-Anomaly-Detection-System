@@ -263,6 +263,7 @@ The component scores are first normalized into a comparable 0 to 1 range. Then t
 - `weighted_average`
 - `max_score_voting`
 - `stacking`
+- `moe`
 
 ### Weighted average
 
@@ -281,6 +282,15 @@ If labeled data is available, the ensemble can train a logistic regression meta-
 When labels are available and enough labeled samples exist, the ensemble can search for the threshold that maximizes F1, then precision, then threshold value.
 
 This makes the final boundary more data-driven instead of relying only on a fixed cutoff.
+
+### Mixture of Experts routing
+
+The MoE gate is a lightweight neural network that takes the transformed feature vector as input and outputs a soft assignment over detectors.
+
+- If labeled anomalies are available, the gate learns to route toward detectors that align best with the label.
+- If labels are not available, the gate uses detector disagreement as a self-supervised routing signal.
+
+This makes the ensemble behave more like a conditional router than a fixed weighted average.
 
 ## Final Scoring Layer
 
@@ -351,4 +361,4 @@ If you want the shortest description:
 - Anomaly Transformer combines attention and reconstruction.
 - Deep SVDD measures distance from a learned normal center.
 - The ensemble fuses all scores and calibrates the final threshold.
-
+- The MoE gate learns which detector to trust more for each record.
