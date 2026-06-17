@@ -12,7 +12,13 @@ build/
 *.joblib
 *.pkl
 *.pickle
-artifacts/
+artifacts/*
+!artifacts/large_training_20k/
+artifacts/large_training_20k/*
+!artifacts/large_training_20k/model/
+artifacts/large_training_20k/model/*
+!artifacts/large_training_20k/model/fast_anomaly_pipeline_20k.joblib
+!artifacts/large_training_20k/model/fast_anomaly_pipeline_20k.metadata.json
 models/
 tests/
 docs/

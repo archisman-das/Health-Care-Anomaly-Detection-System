@@ -14,6 +14,7 @@ import pandas as pd
 from fastapi import Depends, FastAPI, File, Header, HTTPException, UploadFile, status
 from fastapi.encoders import jsonable_encoder
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
 
 from .feedback import append_feedback_records
 from .training import load_pipeline, score_records
@@ -757,6 +758,8 @@ def create_app(
     )
     default_feedback_store = resolved_model_path.with_name("feedback_ledger.jsonl")
     app.state.feedback_store_path = str(Path(feedback_store) if feedback_store is not None else default_feedback_store)
+    frontend_dist_path = Path(os.getenv("FRONTEND_DIST_DIR") or Path(__file__).resolve().parents[1] / "web" / "dist")
+    app.state.frontend_dist_path = str(frontend_dist_path)
 
     @app.get("/health", dependencies=[Depends(auth_dependency)])
     def health() -> dict[str, Any]:
@@ -957,6 +960,28 @@ def create_app(
             "message": "Feedback batch recorded for periodic retraining.",
         }
 
+    if frontend_dist_path.exists():
+        index_path = frontend_dist_path / "index.html"
+
+        @app.get("/", include_in_schema=False)
+        def frontend_root() -> FileResponse:
+            if not index_path.exists():
+                raise HTTPException(status_code=404, detail="Frontend bundle not found.")
+            return FileResponse(index_path)
+
+        @app.get("/{path:path}", include_in_schema=False)
+        def frontend_fallback(path: str) -> FileResponse:
+            if path.startswith(("api/", "health", "models", "dashboard-data.json", "predict", "explain", "feedback")):
+                raise HTTPException(status_code=404, detail="Not found")
+
+            candidate = frontend_dist_path / path
+            if candidate.is_file():
+                return FileResponse(candidate)
+
+            if not index_path.exists():
+                raise HTTPException(status_code=404, detail="Frontend bundle not found.")
+            return FileResponse(index_path)
+
     return app
 
 
@@ -977,7 +1002,7 @@ def main() -> None:
         help="Optional JSONL path to append clinician feedback records for periodic retraining.",
     )
     parser.add_argument("--host", default="127.0.0.1", help="Host interface to bind the API server to.")
-    parser.add_argument("--port", type=int, default=8001, help="TCP port to serve the API on.")
+    parser.add_argument("--port", type=int, default=int(os.getenv("PORT", "8001")), help="TCP port to serve the API on.")
     parser.add_argument("--reload", action=argparse.BooleanOptionalAction, default=False, help="Enable Uvicorn auto-reload.")
     args = parser.parse_args()
 

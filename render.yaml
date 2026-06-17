@@ -1,0 +1,7 @@
+services:
+  - type: web
+    name: rural-health-anomaly-dashboard
+    env: docker
+    autoDeploy: true
+    dockerfilePath: ./Dockerfile
+    healthCheckPath: /

@@ -148,6 +148,39 @@ cd web
 npm run dev
 ```
 
+## Deployment
+
+The project now includes a Docker image that builds the React dashboard, serves it from the FastAPI backend, and ships with the trained model artifact used by the dashboard.
+
+If you want to deploy on Render, the repo also includes `render.yaml` so you can create a Render Blueprint from GitHub.
+
+### Build The Image
+
+```bash
+docker build -t rural-health-anomaly-dashboard .
+```
+
+### Run The Container
+
+```bash
+docker run --rm -p 8001:8001 rural-health-anomaly-dashboard
+```
+
+Then open:
+
+- `http://localhost:8001`
+
+### Deployment Notes
+
+| Item | Value |
+| --- | --- |
+| Frontend | Built from `web/` and served from the same app origin |
+| API | FastAPI backend on port `8001` |
+| Model artifact | Included in the image from `artifacts/large_training_20k/model/fast_anomaly_pipeline_20k.joblib` |
+| Static SPA support | Enabled through the backend fallback route |
+| Optional auth | Use `API_AUTH_TOKEN` or `--auth-token` if you want to protect requests |
+| Render | Use the included `render.yaml` blueprint with a Docker web service |
+
 ## The Clinical Workflow
 
 ### Step 1. Patient Details
