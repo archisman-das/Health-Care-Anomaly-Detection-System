@@ -1,5 +1,7 @@
 """Rural health anomaly detection package."""
 
+import sys
+
 from .config import PreprocessingConfig
 from .autoencoder import DeepAutoencoder
 from .cnn_autoencoder import CNNAutoencoder
@@ -51,3 +53,9 @@ __all__ = [
     "SCHEMA_LIST_NUMERIC_FEATURES",
     "SCHEMA_EXCLUDED_TEXT_FEATURES",
 ]
+
+FastClinicalEnsemble = ParallelAnomalyEnsemble
+
+_main_module = sys.modules.get("__main__")
+if _main_module is not None and not hasattr(_main_module, "FastClinicalEnsemble"):
+    setattr(_main_module, "FastClinicalEnsemble", ParallelAnomalyEnsemble)
