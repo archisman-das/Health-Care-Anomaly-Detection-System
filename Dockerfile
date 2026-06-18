@@ -11,7 +11,8 @@ RUN npm run build
 FROM python:3.11-slim
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
-    PYTHONUNBUFFERED=1
+    PYTHONUNBUFFERED=1 \
+    FRONTEND_DIST_DIR=/app/web/dist
 
 WORKDIR /app
 

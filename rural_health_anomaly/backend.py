@@ -958,7 +958,7 @@ def create_app(
             "message": "Feedback batch recorded for periodic retraining.",
         }
 
-    frontend_dist = Path(__file__).resolve().parents[1] / "web" / "dist"
+    frontend_dist = Path(os.getenv("FRONTEND_DIST_DIR", "/app/web/dist"))
     frontend_index = frontend_dist / "index.html"
     if frontend_index.exists():
         app.mount("/", StaticFiles(directory=str(frontend_dist), html=True), name="frontend")
