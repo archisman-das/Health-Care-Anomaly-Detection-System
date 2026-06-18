@@ -8,7 +8,9 @@ WORKDIR /app
 COPY pyproject.toml README.md /app/
 COPY rural_health_anomaly /app/rural_health_anomaly
 COPY anomaly_cli.py backend_server.py dashboard_server.py example_training_inference.py preprocessing_pipeline.py train_pipeline.py /app/
-COPY artifacts /app/artifacts
+COPY artifacts/web-demo-model.joblib /app/artifacts/web-demo-model.joblib
+COPY artifacts/web-demo-model.metadata.json /app/artifacts/web-demo-model.metadata.json
+COPY artifacts/web-demo-feature-map.csv /app/artifacts/web-demo-feature-map.csv
 
 RUN pip install --no-cache-dir .
 

@@ -12,7 +12,11 @@ build/
 *.joblib
 *.pkl
 *.pickle
-artifacts/
+artifacts/*
+!artifacts/
+!artifacts/web-demo-model.joblib
+!artifacts/web-demo-model.metadata.json
+!artifacts/web-demo-feature-map.csv
 models/
 tests/
 docs/
