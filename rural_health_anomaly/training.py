@@ -7,6 +7,7 @@ import hashlib
 import json
 import re
 import pickle
+import warnings
 import sys
 import time
 from datetime import datetime, timezone
@@ -19,6 +20,10 @@ import pandas as pd
 from sklearn.model_selection import train_test_split
 from sklearn.decomposition import PCA
 from sklearn.manifold import TSNE
+try:
+    from sklearn.exceptions import InconsistentVersionWarning
+except Exception:  # pragma: no cover - older scikit-learn versions
+    InconsistentVersionWarning = None
 
 from .config import PreprocessingConfig
 from .pipeline import build_anomaly_pipeline
@@ -2114,8 +2119,12 @@ def save_pipeline(pipeline, output_path: str | Path) -> None:
 
 def load_pipeline(path: str | Path):
     """Load a trained pipeline from disk."""
-
-    return joblib.load(Path(path))
+    model_path = Path(path)
+    if InconsistentVersionWarning is not None:
+        with warnings.catch_warnings():
+            warnings.filterwarnings("ignore", category=InconsistentVersionWarning)
+            return joblib.load(model_path)
+    return joblib.load(model_path)
 
 
 def score_records(pipeline, data: pd.DataFrame) -> pd.DataFrame:
