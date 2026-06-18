@@ -14,6 +14,7 @@ import pandas as pd
 from fastapi import Depends, FastAPI, File, Header, HTTPException, UploadFile, status
 from fastapi.encoders import jsonable_encoder
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 
 from .feedback import append_feedback_records
 from .training import load_pipeline, score_records
@@ -765,15 +766,6 @@ def create_app(
             **_model_metadata(app),
         }
 
-    @app.get("/")
-    def root() -> dict[str, Any]:
-        return {
-            "status": "ok",
-            "service": title,
-            "health": "/health",
-            "docs": "/docs",
-        }
-
     @app.get("/models", dependencies=[Depends(auth_dependency)])
     def models() -> dict[str, Any]:
         return {
@@ -965,6 +957,11 @@ def create_app(
             "path": str(store_path),
             "message": "Feedback batch recorded for periodic retraining.",
         }
+
+    frontend_dist = Path(__file__).resolve().parents[1] / "web" / "dist"
+    frontend_index = frontend_dist / "index.html"
+    if frontend_index.exists():
+        app.mount("/", StaticFiles(directory=str(frontend_dist), html=True), name="frontend")
 
     return app
 

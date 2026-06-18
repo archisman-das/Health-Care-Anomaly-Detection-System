@@ -1,3 +1,13 @@
+FROM node:20-slim AS web-builder
+
+WORKDIR /app/web
+
+COPY web/package*.json ./
+RUN npm ci
+
+COPY web/ ./
+RUN npm run build
+
 FROM python:3.11-slim
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
@@ -11,6 +21,7 @@ COPY anomaly_cli.py backend_server.py dashboard_server.py example_training_infer
 COPY artifacts/web-demo-model.joblib /app/artifacts/web-demo-model.joblib
 COPY artifacts/web-demo-model.metadata.json /app/artifacts/web-demo-model.metadata.json
 COPY artifacts/web-demo-feature-map.csv /app/artifacts/web-demo-feature-map.csv
+COPY --from=web-builder /app/web/dist /app/web/dist
 
 RUN pip install --no-cache-dir .
 
